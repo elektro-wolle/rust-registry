@@ -44,7 +44,6 @@ impl Registry {
         }
     }
 
-
     async fn handle_request(&self, req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
         let (parts, body) = req.into_parts();
         let body_content = hyper::body::to_bytes(body).await;
@@ -58,10 +57,12 @@ impl Registry {
             (&Method::HEAD, path) if path.starts_with("/v2/") && path.contains("/blobs/") => { self.handle_head(path) }
             (&Method::PUT, path)  if path.starts_with("/v2/") => { self.handle_put(&parts, &body_content, path) }
             // handle post request to /v2/<repo>/manifests/<tag>
+            _ => { Self::handle_default_error() }
+        }
+    }
 
-
-            _ => {
-                let response_body = json!({
+    fn handle_default_error() -> Result<Response<Body>, Error> {
+        let response_body = json!({
                     "errors": [
                         {
                             "code": "UNSUPPORTED",
@@ -69,14 +70,12 @@ impl Registry {
                         },
                     ]
                 });
-                let response = Response::builder()
-                    .status(404)
-                    .header(CONTENT_TYPE, "application/json")
-                    .body(Body::from(response_body.to_string()))
-                    .unwrap();
-                Ok(response)
-            }
-        }
+        let response = Response::builder()
+            .status(404)
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(response_body.to_string()))
+            .unwrap();
+        Ok(response)
     }
 
     fn handle_put(&self, parts: &Parts, body_content: &Result<hyper::body::Bytes, hyper::Error>, path: &str) -> Result<Response<Body>, hyper::Error> {
