@@ -3,6 +3,7 @@
 ## TODOs
 
 - [ ] rewrite for actix-web
+- [ ] add logging with https://docs.rs/log4rs/1.2.0/log4rs/
 - [ ] docker push pong:8000/foo/sen:1.2.3  -> invalid checksum digest format
 - [ ] docker pull pong:8000/foo/sen:1.2.3  -> Error response from daemon: missing signature key
 - [ ] add tests, based on https://github.com/ecarrara/oci-registry-client
