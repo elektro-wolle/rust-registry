@@ -61,7 +61,7 @@ impl Registry {
         }
     }
 
-    fn handle_default_error() -> Result<Response<Body>, Error> {
+    fn handle_default_error() -> Result<Response<Body>, hyper::Error> {
         let response_body = json!({
                     "errors": [
                         {
