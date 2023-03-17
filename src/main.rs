@@ -141,8 +141,8 @@ impl Registry {
                 Ok(response)
             }
             (Method::PATCH, path) if path.starts_with("/v2/") && path.contains("/blobs/uploads/") => {
-                let (repo_name, uuid) = parse_repo_name_and_uuid(&path.trim_start_matches("/v2/"));
-                let upload_path = self.storage_path.join(&repo_name).join(format!("blobs/uploads/{}", uuid));
+                let (repo_name, uuid) = parse_repo_name_and_uuid(path.trim_start_matches("/v2/"));
+                let upload_path = self.storage_path.join(repo_name).join(format!("blobs/uploads/{}", uuid));
                 let mut dir_builder = DirBuilder::new();
                 println!("creating dir: {}", upload_path.parent().unwrap().display());
                 println!("headers: {:#?} size: {}", parts.headers, body_content.as_ref().unwrap().len());
@@ -156,7 +156,7 @@ impl Registry {
                         return Ok(Response::builder().status(500).body(Body::empty()).unwrap());
                     }
                 };
-                if let Err(err) = file.write_all(&(body_content.as_ref().unwrap())) {
+                if let Err(err) = file.write_all(body_content.as_ref().unwrap()) {
                     eprintln!("Failed to write to file {}: {}", upload_path.display(), err);
 
                     return Ok(Response::builder().status(500).body(Body::empty()).unwrap());
@@ -168,10 +168,10 @@ impl Registry {
                     .header("Docker-Upload-UUID", uuid)
                     .body(Body::empty())
                     .unwrap();
-                return Ok(response);
+                Ok(response)
             }
             (Method::HEAD, path) if path.starts_with("/v2/") && path.contains("/blobs/") => {
-                let (repo_name, digest) = parse_repo_name_and_digest(&path.trim_start_matches("/v2/"));
+                let (repo_name, digest) = parse_repo_name_and_digest(path.trim_start_matches("/v2/"));
                 let blob_path = self.storage_path.join(repo_name).join(format!("blobs/{}", digest));
                 if blob_path.exists() {
                     let response = Response::builder()
@@ -226,7 +226,7 @@ impl Registry {
                         return Ok(response);
                     }
                     Some(q) => {
-                        let (repo_name, uuid) = parse_repo_name_and_uuid(&path.trim_start_matches("/v2/"));
+                        let (repo_name, uuid) = parse_repo_name_and_uuid(path.trim_start_matches("/v2/"));
                         let upload_path = self.storage_path.join(&repo_name).join(format!("blobs/uploads/{}", uuid));
 
                         let query = url::form_urlencoded::parse(q.as_bytes());
@@ -264,7 +264,7 @@ impl Registry {
                     .header("Content-Length", "0")
                     .body(Body::empty())
                     .unwrap();
-                return Ok(response);
+                Ok(response)
             }
             // handle post request to /v2/<repo>/manifests/<tag>
 
