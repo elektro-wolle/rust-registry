@@ -1,3 +1,4 @@
+use std::cmp::max;
 use std::collections::HashMap;
 use std::fs::{self, DirBuilder, File};
 use std::io::{self, Read, Write};
@@ -87,20 +88,39 @@ impl Registry {
             }
             (Method::GET, path) if path.starts_with("/v2/") => {
                 let (repo_name, tag) = parse_repo_name_and_tag(path.trim_start_matches("/v2/"));
-                let manifest_path = self.storage_path.join(repo_name).join(format!("manifests/{}.json", tag));
-                if let Ok(file) = File::open(manifest_path) {
-                    let mut buf_reader = io::BufReader::new(file);
-                    let mut contents = String::new();
-                    if let Ok(_) = buf_reader.read_to_string(&mut contents)
-                    {
-                        let manifest: ManifestV2 = serde_json::from_str(&contents).unwrap();
-                        let response = Response::builder()
-                            .status(200)
-                            .header(CONTENT_TYPE, "application/json")
-                            .header("Docker-Content-Digest", manifest.config.unwrap().digest)
-                            .body(Body::from(contents))
-                            .unwrap();
-                        return Ok(response);
+                if !tag.starts_with("sha256:") {
+                    let manifest_path = self.storage_path.join(&repo_name).join(format!("{}.json", tag));
+                    println!("manifest_path: {}", manifest_path.display());
+                    if let Ok(file) = File::open(manifest_path) {
+                        let mut buf_reader = io::BufReader::new(file);
+                        let mut contents = String::new();
+                        if let Ok(_) = buf_reader.read_to_string(&mut contents)
+                        {
+                            let manifest: ManifestV2 = serde_json::from_str(&contents).unwrap();
+                            let response = Response::builder()
+                                .status(200)
+                                .header(CONTENT_TYPE, "application/json")
+                                .header("Docker-Content-Digest", manifest.config.unwrap().digest)
+                                .body(Body::from(contents))
+                                .unwrap();
+                            return Ok(response);
+                        }
+                    }
+                } else {
+                    let manifest_path = self.storage_path.join(&repo_name).join(format!("{}", tag));
+                    println!("manifest_path: {}", manifest_path.display());
+                    if let Ok(file) = File::open(manifest_path) {
+                        let mut buf_reader = io::BufReader::new(file);
+                        let mut contents = String::new();
+                        if let Ok(_) = buf_reader.read_to_string(&mut contents)
+                        {
+                            let response = Response::builder()
+                                .status(200)
+                                .header(CONTENT_TYPE, "application/json")
+                                .body(Body::from(contents))
+                                .unwrap();
+                            return Ok(response);
+                        }
                     }
                 }
                 let response_body = json!({
@@ -119,9 +139,9 @@ impl Registry {
                 Ok(response)
             }
             (Method::POST, path) if path.starts_with("/v2/") && path.ends_with("/blobs/uploads/") => {
-                let (repo_name, _) = parse_repo_name_and_tag(path.trim_end_matches("/blobs/uploads/").trim_start_matches("/v2/"));
+                let repo_name = path.trim_end_matches("/blobs/uploads/").trim_start_matches("/v2/");
                 let uuid = Uuid::new_v4();
-                let upload_path = self.storage_path.join(repo_name).join(format!("blobs/uploads/{}", uuid));
+                let upload_path = self.storage_path.join(&repo_name).join(format!("blobs/uploads/{}", uuid));
 
                 let mut dir_builder = DirBuilder::new();
                 dir_builder.recursive(true).create(upload_path.parent().unwrap()).unwrap();
@@ -135,7 +155,7 @@ impl Registry {
                 };
                 let response = Response::builder()
                     .status(202)
-                    .header("Location", format!("/v2/{}/blobs/uploads/{}", repo_name, uuid))
+                    .header("Location", format!("/v2/{}/blobs/uploads/{}", &repo_name, uuid))
                     .body(Body::empty())
                     .unwrap();
                 Ok(response)
@@ -195,8 +215,10 @@ impl Registry {
                     None => {
                         println!("Upload blob: {}", path);
                         let (repo_name, tag) = parse_repo_name_and_tag(path.trim_start_matches("/v2/"));
-                        let blob_path = self.storage_path.join(repo_name).join(format!("blobs/{}.dat", tag));
+                        let blob_path = self.storage_path.join(repo_name).join(format!("{}.json", tag));
                         println!("Uploading blob: {} to: {:?}", path, &blob_path);
+                        let mut dir_builder = DirBuilder::new();
+                        dir_builder.recursive(true).create(blob_path.parent().unwrap()).unwrap();
                         if let Ok(mut file) = File::create(blob_path) {
                             if let Err(e) = file.write_all(&(body_content.unwrap())) {
                                 return Ok(Response::new(Body::from(format!("Error writing blob: {}", e))));
@@ -211,13 +233,13 @@ impl Registry {
                         }
                         println!("Failed uploading blob: {}", path);
                         let response_body = json!({
-                "errors": [
-                    {
-                        "code": "BLOB_UNKNOWN",
-                        "message": "blob unknown",
-                    },
-                ]
-            });
+                            "errors": [
+                                {
+                                    "code": "BLOB_UNKNOWN",
+                                    "message": "blob unknown",
+                                },
+                            ]
+                        });
                         let response = Response::builder()
                             .status(404)
                             .header(CONTENT_TYPE, "application/json")
@@ -289,24 +311,27 @@ impl Registry {
     }
 }
 
-fn parse_repo_name_and_tag(path: &str) -> (&str, &str) {
+fn parse_repo_name_and_tag(path: &str) -> (String, String) {
     let parts: Vec<&str> = path.split('/').collect();
-    let repo_name = parts[0];
-    let tag = if parts.len() > 1 { parts[1] } else { "latest" };
-    (repo_name, tag)
+    let repo_name = parts[0..(max(1, parts.len()-1))].join("/");
+    let tag = if parts.len() > 1 { parts[parts.len() - 1] } else { "latest" };
+    println!("repo_name: {}, tag: {}", repo_name, tag);
+    (repo_name, tag.to_string())
 }
 
 fn parse_repo_name_and_uuid(path: &str) -> (String, String) {
     let parts: Vec<_> = path.split('/').collect();
-    let repo_name = parts[0].to_string();
+    let repo_name = parts[0..(max(1, parts.len()-3))].join("/");
     let uuid = parts[parts.len() - 1].to_string();
+    println!("repo_name: {}, uuid: {}", repo_name, uuid);
     (repo_name, uuid)
 }
 
 fn parse_repo_name_and_digest(path: &str) -> (String, String) {
     let parts: Vec<_> = path.split('/').collect();
-    let repo_name = parts[0].to_string();
+    let repo_name = parts[0..(max(1, parts.len()-2))].join("/");
     let digest = parts[parts.len() - 1].to_string();
+    println!("repo_name: {}, digest: {}", repo_name, digest);
     (repo_name, digest)
 }
 
