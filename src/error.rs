@@ -1,7 +1,7 @@
 use core::fmt;
 
 use actix_web::{HttpResponse, HttpResponseBuilder};
-use actix_web::error::ResponseError;
+use actix_web::error::{PayloadError, ResponseError};
 use actix_web::http::header::ContentType;
 use actix_web::http::StatusCode;
 use serde::{Deserialize, Serialize};
@@ -12,7 +12,7 @@ pub struct AppError {
     pub message: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct AppErrors {
     pub errors: Vec<AppError>,
 }
@@ -55,6 +55,7 @@ impl ResponseError for MyError {
                 message: self.message.to_string(),
             }]
         };
+        println!("error: {:?}", errors);
         HttpResponseBuilder::new(self.status_code)
             .insert_header(ContentType::json())
             .json(errors)
@@ -63,6 +64,7 @@ impl ResponseError for MyError {
 
 impl From<::actix_web::Error> for MyError {
     fn from(error: ::actix_web::Error) -> MyError {
+        println!("error: {:?}", error);
         MyError {
             message: format!("error: {:?}", error),
             status_code: StatusCode::INTERNAL_SERVER_ERROR,
@@ -71,6 +73,26 @@ impl From<::actix_web::Error> for MyError {
     }
 }
 
+impl From<PayloadError> for MyError {
+    fn from(error: PayloadError) -> MyError {
+        println!("error: {:?}", error);
+        MyError {
+            message: format!("error reading stream: {:?}", error),
+            status_code: StatusCode::INTERNAL_SERVER_ERROR,
+            error_code: "INTERNAL_SERVER_ERROR".to_string(),
+        }
+    }
+}
+
+impl From<std::io::Error> for MyError {
+    fn from(err: std::io::Error) -> Self {
+        MyError {
+            message: format!("error: {:?}", err),
+            status_code: StatusCode::INTERNAL_SERVER_ERROR,
+            error_code: "INTERNAL_SERVER_ERROR".to_string(),
+        }
+    }
+}
 
 impl From<serde_json::Error> for MyError {
     fn from(error: serde_json::Error) -> MyError {

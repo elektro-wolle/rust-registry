@@ -2,14 +2,14 @@
 
 ## TODOs
 
-- [ ] rewrite for actix-web
-- [ ] add logging with https://docs.rs/log4rs/1.2.0/log4rs/
-- [ ] docker push pong:8000/foo/sen:1.2.3  -> invalid checksum digest format
-- [ ] docker pull pong:8000/foo/sen:1.2.3  -> Error response from daemon: missing signature key
+- [x] rewrite for actix-web
+- [x] add logging
+- [x] docker push pong:8000/foo/sen:1.2.3 -> invalid checksum digest format
+- [x] docker pull pong:8000/foo/sen:1.2.3 -> Error response from daemon: missing signature key
 - [ ] add tests, based on https://github.com/ecarrara/oci-registry-client
-- [ ] sha256 checks
-- [ ] Streaming upload
-- [ ] Streaming download
+- [x] sha256 checks
+- [x] Streaming upload
+- [x] Streaming download
 - [ ] basic auth credentials
 - [ ] `docker login` with username and password
 - [ ] add `docker login` token support
@@ -22,7 +22,7 @@
 - [ ] make trait for storage backend
 - [ ] implement storage backend for local fs
 - [ ] implement storage backend for s3
-- [ ] add tls support
+- [x] add tls support
 - [ ] add virtual host support
 - [ ] semver parsing for tags, keeping the latest x-major, y-minor, z-patch versions
 - [ ] cleanup-jobs for removing old images/manifests

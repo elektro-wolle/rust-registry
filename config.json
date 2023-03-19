@@ -1,3 +1,7 @@
 {
-  "storage_path": "target/"
+  "storage_path": "target/",
+  "tls": {
+    "cert": "certs/server.crt",
+    "key": "certs/server.key"
+  }
 }
