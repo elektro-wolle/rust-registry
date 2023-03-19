@@ -1,20 +1,16 @@
-use std::cmp::max;
 use std::collections::HashMap;
 use std::fs::{self, DirBuilder, File};
-use std::io::{self, Read, Write};
-use std::net::{Ipv6Addr, SocketAddrV6};
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use actix_web::{App, delete, Error, error, get, head, http::header, HttpMessage, HttpRequest, HttpResponse, HttpResponseBuilder, HttpServer, patch, post, put, Responder, ResponseError, Result, web};
+use actix_web::{App, Error, get, http::header, HttpRequest, HttpResponse, HttpResponseBuilder, HttpServer, patch, post, Result, web};
 use actix_web::error::ErrorBadRequest;
 use actix_web::http::header::ContentType;
 use actix_web::http::StatusCode;
-use futures::io::AsyncReadExt;
-use futures::stream::{self, TryStreamExt};
-use futures_util::{StreamExt, TryFutureExt};
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 use uuid::*;
 
 #[derive(Debug, Clone)]
