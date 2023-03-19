@@ -17,7 +17,6 @@ pub struct AppErrors {
     pub errors: Vec<AppError>,
 }
 
-
 #[derive(Debug)]
 pub struct MyError {
     pub message: String,
@@ -53,7 +52,7 @@ impl ResponseError for MyError {
             errors: vec![AppError {
                 code: self.error_code.to_string(),
                 message: self.message.to_string(),
-            }]
+            }],
         };
         println!("error: {:?}", errors);
         HttpResponseBuilder::new(self.status_code)
@@ -103,4 +102,3 @@ impl From<serde_json::Error> for MyError {
         }
     }
 }
-

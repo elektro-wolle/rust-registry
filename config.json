@@ -1,7 +1,9 @@
 {
   "storage_path": "target/",
-  "tls": {
-    "cert": "certs/server.crt",
-    "key": "certs/server.key"
-  }
+  "tls_config": {
+    "cert": "certs/pong.pem",
+    "key": "certs/pong.key",
+    "port": 8443
+  },
+  "port": 8080
 }
