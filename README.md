@@ -1,8 +1,14 @@
 # docker registry in rust
 
-Rewrite of docker-registry in rust, using actix-web. This is a work in progress.
+Rewrite of the [Docker Registry HTTP API V2](https://docs.docker.com/registry/spec/api/) in rust, using actix-web.
+It is intended to be used as a private registry for docker images as a replacement for nexus.
 
-Planned Features:
+This project will implement the server-side of the registry API, but not the client-side.
+For client-side functionality, please use [dkregistry-rs](https://github.com/camallo/dkregistry-rs).
+
+**This is a work in progress.**
+
+## Planned Features:
 
 - LDAP Authentication (with groups): Each group can be limited to a namespaces (e.g. group "dev" can only pull/push
   images matching "foo/img/*")
@@ -15,9 +21,9 @@ Planned Features:
 
 Currently, only the basic functionality is implemented. The following features are missing:
 
-## TODOs
+# TODOs
 
-- [x] rewrite for actix-web
+- [x] rewrite endpoints for actix-web
 - [x] add logging
 - [x] docker push pong:8000/foo/sen:1.2.3 -> invalid checksum digest format
 - [x] docker pull pong:8000/foo/sen:1.2.3 -> Error response from daemon: missing signature key
@@ -26,6 +32,10 @@ Currently, only the basic functionality is implemented. The following features a
 - [x] Streaming upload
 - [x] Streaming download
 - [ ] add synchronisation for concurrent uploads
+- [ ] add proxying request to other registries
+- [ ] add support for multiple registries in one instance
+- [ ] add support grouping registries in namespaces, e.g. first query the "dev" registry, then the "prod" registry
+  before gchr.io is queried.
 - [ ] delete unfinished uploads
 - [ ] basic auth credentials
 - [ ] `docker login` with username and password
@@ -43,3 +53,11 @@ Currently, only the basic functionality is implemented. The following features a
 - [ ] add virtual host support
 - [ ] semver parsing for tags, keeping the latest x-major, y-minor, z-patch versions
 - [ ] cleanup-jobs for removing old images/manifests
+
+# License
+
+Licensed under
+
+* MIT license (LICENSE-MIT or http://opensource.org/licenses/MIT)
+
+at your option.
