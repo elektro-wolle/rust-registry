@@ -102,3 +102,20 @@ impl From<serde_json::Error> for MyError {
         }
     }
 }
+
+pub fn map_to_not_found(err: std::io::Error) -> MyError {
+    if err.kind() == std::io::ErrorKind::NotFound {
+        MyError::new(
+            StatusCode::NOT_FOUND,
+            "MANIFEST_UNKNOWN",
+            &format!("file not found: {:?}", err),
+        )
+    } else {
+        MyError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "UNKNOWN",
+            &format!("file error: {:?}", err),
+        )
+    }
+}
+

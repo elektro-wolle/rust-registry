@@ -53,9 +53,14 @@ struct AppState {
     registry: Arc<Registry>,
 }
 
+struct UploadedFile {
+    sha256: String,
+    size: u64,
+}
+
 impl AppState {
     fn get_upload_path(&self, path: &String) -> PathBuf {
-        // canonicalize() will remove any "." and ".." from the path
+        // clean() will remove any "." and ".." from the path
         let sub_path = PathBuf::from(format!("/{}", path)).clean();
         let target_path = format!("{}/{}", self.registry.storage_path, sub_path.display());
         // second clean() to ensure that the path is clean
@@ -66,11 +71,9 @@ impl AppState {
     }
 }
 
-struct UploadedFile {
-    sha256: String,
-    size: u64,
-}
-
+/**
+Upload file and calculate sha256
+ */
 async fn write_payload_to_file(
     payload: &mut Payload,
     target_path: &PathBuf,
@@ -79,10 +82,7 @@ async fn write_payload_to_file(
     let mut context = Context::new(&SHA256);
     while let Some(chunk) = payload.next().await {
         let mut body_content = web::BytesMut::new();
-        let chunk = chunk?;
-        body_content.extend_from_slice(&chunk);
-
-
+        body_content.extend_from_slice(&chunk?);
         context.update(&body_content);
         manifest_file.write_all(&body_content)?;
     }
@@ -94,10 +94,12 @@ async fn write_payload_to_file(
 
 fn create_or_replace_file(path_to_file: &PathBuf) -> Result<File, MyError> {
     let mut dir_builder = DirBuilder::new();
+    trace!("creating dir: {:?}, saving file {:?}", path_to_file.parent(), path_to_file);
+
     dir_builder
         .recursive(true)
-        .create(path_to_file.parent().unwrap())
-        .unwrap();
+        .create(path_to_file.parent().ok_or(ErrorBadRequest("invalid path"))?)
+        .map_err(ErrorBadRequest)?;
 
     let manifest_file = OpenOptions::new()
         .read(true)
@@ -146,32 +148,19 @@ async fn handle_v2_catalog(data: Data<AppState>) -> Result<Json<RepositoryInfo>,
 }
 
 #[post("/v2/{repo_name:.*}/blobs/uploads/")]
-async fn handle_post(data: Data<AppState>, req: HttpRequest) -> Result<HttpResponse, MyError> {
+async fn handle_post(req: HttpRequest) -> Result<HttpResponse, MyError> {
     let repo_name = req
         .match_info()
         .get("repo_name")
         .ok_or(ErrorBadRequest("repo_name not present"))?;
     let uuid = Uuid::new_v4();
-    let upload_path = data.get_upload_path(&format!("{}/blobs/uploads/{}", repo_name, uuid));
 
-    DirBuilder::new()
-        .recursive(true)
-        .create(upload_path.parent().unwrap())?;
-
-    File::create(&upload_path)
-        .map(|_| {
-            HttpResponseBuilder::new(StatusCode::ACCEPTED)
-                .insert_header((
-                    header::LOCATION,
-                    format!("/v2/{}/blobs/uploads/{}", &repo_name, uuid),
-                ))
-                .finish()
-        })
-        .map_err(|err| MyError {
-            status_code: StatusCode::INTERNAL_SERVER_ERROR,
-            error_code: "UNKNOWN".to_string(),
-            message: format!("Failed to create file {:?}: {:?}", upload_path, err),
-        })
+    Ok(HttpResponseBuilder::new(StatusCode::ACCEPTED)
+        .insert_header((
+            header::LOCATION,
+            format!("/v2/{}/blobs/uploads/{}", &repo_name, uuid),
+        ))
+        .finish())
 }
 
 #[patch("/v2/{repo_name:.*}/blobs/uploads/{uuid}")]
@@ -192,8 +181,6 @@ async fn handle_patch(
     let upload_path = data.get_upload_path(&format!("{}/blobs/uploads/{}", repo_name, uuid));
     let uploaded_file = write_payload_to_file(&mut payload, &upload_path).await?;
 
-    trace!("creating dir: {:?}", upload_path.parent());
-    trace!("writing to file {:?}", upload_path);
 
     Ok(HttpResponseBuilder::new(StatusCode::ACCEPTED)
         .insert_header((header::RANGE, format!("0-{}", uploaded_file.size)))
@@ -207,7 +194,7 @@ async fn handle_get_manifest_by_tag(
     data: Data<AppState>,
     req: HttpRequest,
 ) -> Result<HttpResponse, MyError> {
-    let mut file = get_manifest_file(data, req)?;
+    let mut file = lookup_manifest_file(data, req)?;
     let mut buffer = Vec::new();
 
     // read file as string
@@ -231,7 +218,7 @@ async fn handle_head_manifest_by_tag(
     data: Data<AppState>,
     req: HttpRequest,
 ) -> Result<HttpResponse, MyError> {
-    let file = get_manifest_file(data, req)?;
+    let file = lookup_manifest_file(data, req)?;
     let metadata = file.metadata()?;
     if metadata.len() == 0 || metadata.is_dir() {
         return Err(MyError::new(
@@ -245,23 +232,7 @@ async fn handle_head_manifest_by_tag(
         .finish())
 }
 
-fn map_to_not_found(err: std::io::Error) -> MyError {
-    if err.kind() == std::io::ErrorKind::NotFound {
-        MyError::new(
-            StatusCode::NOT_FOUND,
-            "MANIFEST_UNKNOWN",
-            &format!("file not found: {:?}", err),
-        )
-    } else {
-        MyError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "UNKNOWN",
-            &format!("file error: {:?}", err),
-        )
-    }
-}
-
-fn get_manifest_file(data: Data<AppState>, req: HttpRequest) -> Result<File, MyError> {
+fn lookup_manifest_file(data: Data<AppState>, req: HttpRequest) -> Result<File, MyError> {
     let repo_name = req
         .match_info()
         .get("repo_name")
@@ -367,7 +338,7 @@ async fn handle_put_with_digest(
         upload_path.display(),
         path_to_file.display()
     );
-    fs::rename(upload_path, path_to_file).unwrap();
+    fs::rename(upload_path, path_to_file).map_err(map_to_not_found)?;
 
     Ok(HttpResponseBuilder::new(StatusCode::CREATED)
         .insert_header((header::LOCATION, format!("/v2/{}", &layer_path)))
