@@ -4,14 +4,14 @@ use std::io::prelude::*;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use actix_web::{
-    App, Error, get, head, http::header, HttpRequest, HttpResponse, HttpResponseBuilder, HttpServer, middleware, patch,
-    post, put, Result, web,
-};
+use actix_web::{App, Error, get, head, http::header, HttpRequest, HttpResponse, HttpResponseBuilder, HttpServer, middleware, patch, post, put, Result, web};
+use actix_web::dev::ServiceRequest;
 use actix_web::error::ErrorBadRequest;
 use actix_web::http::header::CONTENT_LENGTH;
 use actix_web::http::StatusCode;
 use actix_web::web::{Data, Json, Payload};
+use actix_web_httpauth::extractors::bearer::BearerAuth;
+use actix_web_httpauth::middleware::HttpAuthentication;
 use futures_util::StreamExt;
 use log::{debug, info, trace};
 use path_clean::PathClean;
@@ -384,6 +384,26 @@ fn load_rustls_config(tls_config: &TlsConfig) -> ServerConfig {
     config.with_single_cert(cert_chain, keys.remove(0)).unwrap()
 }
 
+pub async fn user_authorization_check(
+    req: ServiceRequest,
+    credentials: Option<BearerAuth>,
+) -> Result<ServiceRequest, (Error, ServiceRequest)> {
+    let basic_auth: Option<String> =
+        match req.headers().get("authorization") {
+            Some(h) if !h.is_empty() && h.to_str().is_ok() => {
+                let auth = h.to_str().unwrap();
+                auth.strip_prefix("Basic ")
+                    .map(|s| s.to_string())
+            }
+            _ => None
+        };
+    let bearer_auth = credentials.map(|c| { c.token().to_string() });
+
+    trace!("user_authorization_check: basic: {:?}, bearer: {:?}", basic_auth, bearer_auth);
+    Ok(req)
+    //Err((ErrorUnauthorized("Unauthorized"), req))
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     let registry_config: Registry =
@@ -402,6 +422,7 @@ async fn main() -> std::io::Result<()> {
 
     let mut server = HttpServer::new(move || {
         App::new()
+            .wrap(HttpAuthentication::with_fn(user_authorization_check))
             .app_data(Data::clone(&app_data))
             .wrap(actix_cors::Cors::permissive()
                 .allow_any_origin()
