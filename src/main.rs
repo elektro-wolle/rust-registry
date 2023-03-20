@@ -456,6 +456,9 @@ async fn main() -> std::io::Result<()> {
     let mut server = HttpServer::new(move || {
         App::new()
             .app_data(Data::clone(&app_data))
+            .wrap(actix_cors::Cors::permissive()
+                .allow_any_origin()
+                .allow_any_method())
             .wrap(middleware::Logger::default())
             .service(handle_get_v2)
             .service(handle_v2_catalog)

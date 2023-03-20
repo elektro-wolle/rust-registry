@@ -9,14 +9,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57a7559404a7f3573127aab53c08ce37a6c6a315c374a31070f3c91cd1b4a7fe"
 dependencies = [
  "bitflags",
- "bytes",
- "futures-core",
- "futures-sink",
- "log",
- "memchr",
- "pin-project-lite",
- "tokio",
- "tokio-util",
+    "bytes",
+    "futures-core",
+    "futures-sink",
+    "log",
+    "memchr",
+    "pin-project-lite",
+    "tokio",
+    "tokio-util",
+]
+
+[[package]]
+name = "actix-cors"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b340e9cfa5b08690aae90fb61beb44e9b06f44fe3d0f93781aaa58cfba86245e"
+dependencies = [
+    "actix-utils",
+    "actix-web",
+    "derive_more",
+    "futures-util",
+    "log",
+    "once_cell",
+    "smallvec",
 ]
 
 [[package]]
@@ -25,9 +40,9 @@ version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d832782fac6ca7369a70c9ee9a20554623c5e51c76e190ad151780ebea1cf689"
 dependencies = [
- "actix-http",
- "actix-service",
- "actix-utils",
+    "actix-http",
+    "actix-service",
+    "actix-utils",
  "actix-web",
  "askama_escape",
  "bitflags",
@@ -976,16 +991,17 @@ dependencies = [
 name = "rust-registry"
 version = "0.1.0"
 dependencies = [
- "actix-files",
- "actix-tls",
- "actix-web",
- "base64",
- "env_logger",
- "futures-util",
- "hex",
- "log",
- "path-clean",
- "ring",
+    "actix-cors",
+    "actix-files",
+    "actix-tls",
+    "actix-web",
+    "base64",
+    "env_logger",
+    "futures-util",
+    "hex",
+    "log",
+    "path-clean",
+    "ring",
  "rustls",
  "rustls-pemfile",
  "serde",

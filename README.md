@@ -27,7 +27,7 @@ Currently, only the basic functionality is implemented. The following features a
 - [x] add logging
 - [x] docker push pong:8000/foo/sen:1.2.3 -> invalid checksum digest format
 - [x] docker pull pong:8000/foo/sen:1.2.3 -> Error response from daemon: missing signature key
-- [ ] add CORS Headers
+- [x] add CORS Headers
 - [ ] add /v2/_catalog listing
 - [x] sha256 checks
 - [x] Streaming upload
