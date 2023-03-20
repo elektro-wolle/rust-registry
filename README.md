@@ -27,10 +27,12 @@ Currently, only the basic functionality is implemented. The following features a
 - [x] add logging
 - [x] docker push pong:8000/foo/sen:1.2.3 -> invalid checksum digest format
 - [x] docker pull pong:8000/foo/sen:1.2.3 -> Error response from daemon: missing signature key
-- [ ] add tests, based on https://github.com/ecarrara/oci-registry-client
+- [ ] add CORS Headers
+- [ ] add /v2/_catalog listing
 - [x] sha256 checks
 - [x] Streaming upload
 - [x] Streaming download
+- [ ] add tests, based on https://github.com/ecarrara/oci-registry-client
 - [ ] add synchronisation for concurrent uploads
 - [ ] add proxying request to other registries
 - [ ] add support for multiple registries in one instance
@@ -43,8 +45,10 @@ Currently, only the basic functionality is implemented. The following features a
 - [ ] add docker-compose file for easy setup of database
 - [ ] add database backend for reference counting and garbage collection
 - [ ] add search within database
+- [ ] add /v2/_catalog listing via DB
 - [ ] ldap auth
 - [ ] config file for auth and storage backends
+- [ ] add DELETE Endpoints
 - [ ] make trait for auth backend
 - [ ] make trait for storage backend
 - [ ] implement storage backend for local fs
