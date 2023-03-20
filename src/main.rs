@@ -59,15 +59,15 @@ struct UploadedFile {
 }
 
 impl AppState {
-    fn get_upload_path(&self, path: &String) -> PathBuf {
+    fn get_upload_path(&self, _req: &HttpRequest, path: &String) -> PathBuf {
         // clean() will remove any "." and ".." from the path
         let sub_path = PathBuf::from(format!("/{}", path)).clean();
         let target_path = format!("{}/{}", self.registry.storage_path, sub_path.display());
         // second clean() to ensure that the path is clean
         PathBuf::from(target_path).clean()
     }
-    fn get_layer_path(&self, path: &String) -> PathBuf {
-        self.get_upload_path(path)
+    fn get_layer_path(&self, req: &HttpRequest, path: &String) -> PathBuf {
+        self.get_upload_path(req, path)
     }
 }
 
@@ -178,7 +178,7 @@ async fn handle_patch(
         .get("uuid")
         .ok_or(ErrorBadRequest("uuid not present"))?;
 
-    let upload_path = data.get_upload_path(&format!("{}/blobs/uploads/{}", repo_name, uuid));
+    let upload_path = data.get_upload_path(&req, &format!("{}/blobs/uploads/{}", repo_name, uuid));
     let uploaded_file = write_payload_to_file(&mut payload, &upload_path).await?;
 
 
@@ -241,7 +241,7 @@ fn lookup_manifest_file(data: Data<AppState>, req: HttpRequest) -> Result<File, 
         .match_info()
         .get("tag")
         .ok_or(ErrorBadRequest("tag not present"))?;
-    let manifest_path = data.get_layer_path(&format!("{}/manifests/{}.json", repo_name, tag));
+    let manifest_path = data.get_layer_path(&req, &format!("{}/manifests/{}.json", repo_name, tag));
     debug!("manifest_path: {}", manifest_path.display());
     let file = File::open(manifest_path).map_err(map_to_not_found)?;
     Ok(file)
@@ -260,7 +260,7 @@ async fn handle_get_layer_by_hash(
         .match_info()
         .get("sha")
         .ok_or(ErrorBadRequest("layer not present"))?;
-    let layer_path = data.get_layer_path(&format!("{}/{}", repo_name, sha));
+    let layer_path = data.get_layer_path(&req, &format!("{}/{}", repo_name, sha));
     let file = actix_files::NamedFile::open_async(&layer_path)
         .await
         .map_err(map_to_not_found)?;
@@ -289,7 +289,7 @@ async fn handle_head_layer_by_hash(
         .match_info()
         .get("sha")
         .ok_or(ErrorBadRequest("sha not present"))?;
-    let layer_path = data.get_layer_path(&format!("{}/blobs/{}", repo_name, sha));
+    let layer_path = data.get_layer_path(&req, &format!("{}/blobs/{}", repo_name, sha));
     trace!("head: layer_path: {}", layer_path.display());
 
     let file = actix_files::NamedFile::open_async(&layer_path)
@@ -331,8 +331,8 @@ async fn handle_put_with_digest(
         .ok_or(ErrorBadRequest("uuid not present"))?;
 
     let layer_path = format!("{}/blobs/{}", repo_name, digest_param.digest);
-    let upload_path = data.get_upload_path(&format!("{}/blobs/uploads/{}", repo_name, uuid));
-    let path_to_file = data.get_layer_path(&layer_path);
+    let upload_path = data.get_upload_path(&req, &format!("{}/blobs/uploads/{}", repo_name, uuid));
+    let path_to_file = data.get_layer_path(&req, &layer_path);
     trace!(
         "Moving upload_path: {} to path_to_file: {}",
         upload_path.display(),
@@ -359,7 +359,7 @@ async fn handle_put_manifest_by_tag(
         .match_info()
         .get("tag")
         .ok_or(ErrorBadRequest("tag not present"))?;
-    let manifest_path = data.get_layer_path(&format!("{}/manifests/{}.json", repo_name, tag));
+    let manifest_path = data.get_layer_path(&req, &format!("{}/manifests/{}.json", repo_name, tag));
     debug!("manifest_path: {}", manifest_path.display());
 
     let mut dir_builder = DirBuilder::new();
@@ -373,7 +373,7 @@ async fn handle_put_manifest_by_tag(
 
     // manifest is stored as tag and sha256:digest
     let manifest_digest_path =
-        data.get_layer_path(&format!("{}/manifests/sha256:{}.json", repo_name, uploaded_path.sha256));
+        data.get_layer_path(&req, &format!("{}/manifests/sha256:{}.json", repo_name, uploaded_path.sha256));
     trace!(
         "manifest_path: {} linked as {}",
         &manifest_path.display(),

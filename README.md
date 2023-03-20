@@ -29,24 +29,26 @@ Currently, only the basic functionality is implemented. The following features a
 - [x] docker pull pong:8000/foo/sen:1.2.3 -> Error response from daemon: missing signature key
 - [x] add CORS Headers
 - [ ] add /v2/_catalog listing
+- [ ] add /v2/<name>/tags/list
+- [ ] basic auth credentials
+- [ ] ldap auth
+- [ ] `docker login` with username and password
 - [x] sha256 checks
 - [x] Streaming upload
 - [x] Streaming download
 - [ ] add tests, based on https://github.com/ecarrara/oci-registry-client
 - [ ] add synchronisation for concurrent uploads
 - [ ] add proxying request to other registries
+- [ ] add virtual host support
 - [ ] add support for multiple registries in one instance
 - [ ] add support grouping registries in namespaces, e.g. first query the "dev" registry, then the "prod" registry
-  before gchr.io is queried.
+  before ghcr.io is queried.
 - [ ] delete unfinished uploads
-- [ ] basic auth credentials
-- [ ] `docker login` with username and password
 - [ ] add `docker login` token support
 - [ ] add docker-compose file for easy setup of database
 - [ ] add database backend for reference counting and garbage collection
 - [ ] add search within database
 - [ ] add /v2/_catalog listing via DB
-- [ ] ldap auth
 - [ ] config file for auth and storage backends
 - [ ] add DELETE Endpoints
 - [ ] make trait for auth backend
@@ -54,7 +56,6 @@ Currently, only the basic functionality is implemented. The following features a
 - [ ] implement storage backend for local fs
 - [ ] implement storage backend for s3
 - [x] add tls support
-- [ ] add virtual host support
 - [ ] semver parsing for tags, keeping the latest x-major, y-minor, z-patch versions
 - [ ] cleanup-jobs for removing old images/manifests
 
