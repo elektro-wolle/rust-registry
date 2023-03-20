@@ -58,17 +58,18 @@ struct UploadedFile {
     size: u64,
 }
 
-impl AppState {
-    fn get_upload_path(&self, _req: &HttpRequest, path: &String) -> PathBuf {
-        // clean() will remove any "." and ".." from the path
-        let sub_path = PathBuf::from(format!("/{}", path)).clean();
-        let target_path = format!("{}/{}", self.registry.storage_path, sub_path.display());
-        // second clean() to ensure that the path is clean
-        PathBuf::from(target_path).clean()
-    }
-    fn get_layer_path(&self, req: &HttpRequest, path: &String) -> PathBuf {
-        self.get_upload_path(req, path)
-    }
+
+fn get_upload_path(_req: &HttpRequest, path: &String) -> PathBuf {
+    let registry = _req.app_data::<Data<AppState>>().unwrap().registry.clone();
+    // clean() will remove any "." and ".." from the path
+    let sub_path = PathBuf::from(format!("/{}", path)).clean();
+    let target_path = format!("{}/{}", registry.storage_path, sub_path.display());
+    // second clean() to ensure that the path is clean
+    PathBuf::from(target_path).clean()
+}
+
+fn get_layer_path(req: &HttpRequest, path: &String) -> PathBuf {
+    get_upload_path(req, path)
 }
 
 /**
@@ -163,38 +164,41 @@ async fn handle_post(req: HttpRequest) -> Result<HttpResponse, MyError> {
         .finish())
 }
 
+#[derive(Deserialize, Serialize)]
+struct ImageNameWithUUID {
+    repo_name: String,
+    uuid: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct ImageNameWithTag {
+    repo_name: String,
+    tag: String,
+}
+
 #[patch("/v2/{repo_name:.*}/blobs/uploads/{uuid}")]
 async fn handle_patch(
-    data: Data<AppState>,
+    info: web::Path<ImageNameWithUUID>,
     req: HttpRequest,
     mut payload: Payload,
 ) -> Result<HttpResponse, MyError> {
-    let repo_name = req
-        .match_info()
-        .get("repo_name")
-        .ok_or(ErrorBadRequest("repo_name not present"))?;
-    let uuid = req
-        .match_info()
-        .get("uuid")
-        .ok_or(ErrorBadRequest("uuid not present"))?;
-
-    let upload_path = data.get_upload_path(&req, &format!("{}/blobs/uploads/{}", repo_name, uuid));
+    let upload_path = get_upload_path(&req, &format!("{}/blobs/uploads/{}", info.repo_name, info.uuid));
     let uploaded_file = write_payload_to_file(&mut payload, &upload_path).await?;
-
 
     Ok(HttpResponseBuilder::new(StatusCode::ACCEPTED)
         .insert_header((header::RANGE, format!("0-{}", uploaded_file.size)))
-        .insert_header(("Docker-Upload-UUID", uuid))
+        .insert_header(("Docker-Upload-UUID", info.uuid.as_str()))
         .insert_header(("Docker-Content-Digest", format!("sha256:{}", uploaded_file.sha256)))
         .finish())
 }
 
 #[get("/v2/{repo_name:.*}/manifests/{tag}")]
 async fn handle_get_manifest_by_tag(
-    data: Data<AppState>,
     req: HttpRequest,
+    info: web::Path<ImageNameWithTag>,
 ) -> Result<HttpResponse, MyError> {
-    let mut file = lookup_manifest_file(data, req)?;
+    let mut file = lookup_manifest_file(req, &info)?;
+
     let mut buffer = Vec::new();
 
     // read file as string
@@ -215,10 +219,10 @@ async fn handle_get_manifest_by_tag(
 
 #[head("/v2/{repo_name:.*}/manifests/{tag}")]
 async fn handle_head_manifest_by_tag(
-    data: Data<AppState>,
     req: HttpRequest,
+    info: web::Path<ImageNameWithTag>,
 ) -> Result<HttpResponse, MyError> {
-    let file = lookup_manifest_file(data, req)?;
+    let file = lookup_manifest_file(req, &info)?;
     let metadata = file.metadata()?;
     if metadata.len() == 0 || metadata.is_dir() {
         return Err(MyError::new(
@@ -232,35 +236,25 @@ async fn handle_head_manifest_by_tag(
         .finish())
 }
 
-fn lookup_manifest_file(data: Data<AppState>, req: HttpRequest) -> Result<File, MyError> {
-    let repo_name = req
-        .match_info()
-        .get("repo_name")
-        .ok_or(ErrorBadRequest("repo_name not present"))?;
-    let tag = req
-        .match_info()
-        .get("tag")
-        .ok_or(ErrorBadRequest("tag not present"))?;
-    let manifest_path = data.get_layer_path(&req, &format!("{}/manifests/{}.json", repo_name, tag));
+fn lookup_manifest_file(req: HttpRequest, info: &ImageNameWithTag) -> Result<File, MyError> {
+    let manifest_path = get_layer_path(&req, &format!("{}/manifests/{}.json", info.repo_name, info.tag));
     debug!("manifest_path: {}", manifest_path.display());
     let file = File::open(manifest_path).map_err(map_to_not_found)?;
     Ok(file)
 }
 
+#[derive(Deserialize, Serialize)]
+struct ImageNameWithDigest {
+    repo_name: String,
+    digest: String,
+}
+
 #[get("/v2/{repo_name:.*}/{sha}")]
 async fn handle_get_layer_by_hash(
-    data: Data<AppState>,
     req: HttpRequest,
+    info: web::Path<ImageNameWithDigest>,
 ) -> Result<HttpResponse, MyError> {
-    let repo_name = req
-        .match_info()
-        .get("repo_name")
-        .ok_or(ErrorBadRequest("repo_name not present"))?;
-    let sha = req
-        .match_info()
-        .get("sha")
-        .ok_or(ErrorBadRequest("layer not present"))?;
-    let layer_path = data.get_layer_path(&req, &format!("{}/{}", repo_name, sha));
+    let layer_path = get_layer_path(&req, &format!("{}/{}", info.repo_name, info.digest));
     let file = actix_files::NamedFile::open_async(&layer_path)
         .await
         .map_err(map_to_not_found)?;
@@ -269,7 +263,7 @@ async fn handle_get_layer_by_hash(
         return Err(MyError::new(
             StatusCode::NOT_FOUND,
             "LAYER_UNKNOWN",
-            &format!("file {} for {} not found: is a directory", sha, repo_name),
+            &format!("file {} for {} not found: is a directory", info.digest, info.repo_name),
         ));
     }
     debug!("streaming layer_path: {}", layer_path.display());
@@ -278,18 +272,10 @@ async fn handle_get_layer_by_hash(
 
 #[head("/v2/{repo_name:.*}/blobs/{sha}")]
 async fn handle_head_layer_by_hash(
-    data: Data<AppState>,
     req: HttpRequest,
+    info: web::Path<ImageNameWithDigest>,
 ) -> Result<HttpResponse, MyError> {
-    let repo_name = req
-        .match_info()
-        .get("repo_name")
-        .ok_or(ErrorBadRequest("repo_name not present"))?;
-    let sha = req
-        .match_info()
-        .get("sha")
-        .ok_or(ErrorBadRequest("sha not present"))?;
-    let layer_path = data.get_layer_path(&req, &format!("{}/blobs/{}", repo_name, sha));
+    let layer_path = get_layer_path(&req, &format!("{}/blobs/{}", info.repo_name, info.digest));
     trace!("head: layer_path: {}", layer_path.display());
 
     let file = actix_files::NamedFile::open_async(&layer_path)
@@ -300,13 +286,13 @@ async fn handle_head_layer_by_hash(
         return Err(MyError::new(
             StatusCode::NOT_FOUND,
             "LAYER_UNKNOWN",
-            &format!("file {} for {} not found: is a directory", sha, repo_name),
+            &format!("file {} for {} not found: is a directory", info.digest, info.repo_name),
         ));
     }
     debug!("return layer_path: {}", layer_path.display());
     Ok(HttpResponseBuilder::new(StatusCode::OK)
         .insert_header((CONTENT_LENGTH, file.metadata().len()))
-        .insert_header(("Docker-Content-Digest", sha.to_string()))
+        .insert_header(("Docker-Content-Digest", info.digest.to_string()))
         .finish())
 }
 
@@ -317,22 +303,13 @@ struct DigestParam {
 
 #[put("/v2/{repo_name:.*}/blobs/uploads/{uuid}")]
 async fn handle_put_with_digest(
-    data: Data<AppState>,
     digest_param: web::Query<DigestParam>,
+    info: web::Path<ImageNameWithUUID>,
     req: HttpRequest,
 ) -> Result<HttpResponse, MyError> {
-    let repo_name = req
-        .match_info()
-        .get("repo_name")
-        .ok_or(ErrorBadRequest("repo_name not present"))?;
-    let uuid = req
-        .match_info()
-        .get("uuid")
-        .ok_or(ErrorBadRequest("uuid not present"))?;
-
-    let layer_path = format!("{}/blobs/{}", repo_name, digest_param.digest);
-    let upload_path = data.get_upload_path(&req, &format!("{}/blobs/uploads/{}", repo_name, uuid));
-    let path_to_file = data.get_layer_path(&req, &layer_path);
+    let layer_path = format!("{}/blobs/{}", info.repo_name, digest_param.digest);
+    let upload_path = get_upload_path(&req, &format!("{}/blobs/uploads/{}", info.repo_name, info.uuid));
+    let path_to_file = get_layer_path(&req, &layer_path);
     trace!(
         "Moving upload_path: {} to path_to_file: {}",
         upload_path.display(),
@@ -347,19 +324,11 @@ async fn handle_put_with_digest(
 
 #[put("/v2/{repo_name:.*}/manifests/{tag}")]
 async fn handle_put_manifest_by_tag(
-    data: Data<AppState>,
     req: HttpRequest,
+    info: web::Path<ImageNameWithTag>,
     mut payload: Payload,
 ) -> Result<HttpResponse, MyError> {
-    let repo_name = req
-        .match_info()
-        .get("repo_name")
-        .ok_or(ErrorBadRequest("repo_name not present"))?;
-    let tag = req
-        .match_info()
-        .get("tag")
-        .ok_or(ErrorBadRequest("tag not present"))?;
-    let manifest_path = data.get_layer_path(&req, &format!("{}/manifests/{}.json", repo_name, tag));
+    let manifest_path = get_layer_path(&req, &format!("{}/manifests/{}.json", info.repo_name, info.tag));
     debug!("manifest_path: {}", manifest_path.display());
 
     let mut dir_builder = DirBuilder::new();
@@ -373,7 +342,7 @@ async fn handle_put_manifest_by_tag(
 
     // manifest is stored as tag and sha256:digest
     let manifest_digest_path =
-        data.get_layer_path(&req, &format!("{}/manifests/sha256:{}.json", repo_name, uploaded_path.sha256));
+        get_layer_path(&req, &format!("{}/manifests/sha256:{}.json", info.repo_name, uploaded_path.sha256));
     trace!(
         "manifest_path: {} linked as {}",
         &manifest_path.display(),
@@ -390,7 +359,7 @@ async fn handle_put_manifest_by_tag(
         .insert_header(("Docker-Content-Digest", format!("sha256:{}", uploaded_path.sha256)))
         .insert_header((
             header::LOCATION,
-            format!("/v2/{}/manifests/{}", repo_name, tag),
+            format!("/v2/{}/manifests/{}", info.repo_name, info.tag),
         ))
         .finish())
 }

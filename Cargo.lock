@@ -53,8 +53,8 @@ dependencies = [
     "log",
     "mime",
     "mime_guess",
- "percent-encoding",
- "pin-project-lite",
+    "percent-encoding",
+    "pin-project-lite",
 ]
 
 [[package]]
