@@ -58,18 +58,13 @@ struct UploadedFile {
     size: u64,
 }
 
-
-fn get_upload_path(_req: &HttpRequest, path: &String) -> PathBuf {
+fn get_layer_path(_req: &HttpRequest, path: &String) -> PathBuf {
     let registry = _req.app_data::<Data<AppState>>().unwrap().registry.clone();
     // clean() will remove any "." and ".." from the path
     let sub_path = PathBuf::from(format!("/{}", path)).clean();
     let target_path = format!("{}/{}", registry.storage_path, sub_path.display());
     // second clean() to ensure that the path is clean
     PathBuf::from(target_path).clean()
-}
-
-fn get_layer_path(req: &HttpRequest, path: &String) -> PathBuf {
-    get_upload_path(req, path)
 }
 
 /**
@@ -111,9 +106,11 @@ fn create_or_replace_file(path_to_file: &PathBuf) -> Result<File, MyError> {
     Ok(manifest_file)
 }
 
-#[derive(Deserialize, Serialize)]
-struct VersionInfo {
-    versions: Vec<String>,
+fn lookup_manifest_file(req: HttpRequest, info: &ImageNameWithTag) -> Result<File, MyError> {
+    let manifest_path = get_layer_path(&req, &format!("{}/manifests/{}.json", info.repo_name, info.tag));
+    debug!("manifest_path: {}", manifest_path.display());
+    let file = File::open(manifest_path).map_err(map_to_not_found)?;
+    Ok(file)
 }
 
 #[get("/v2/")]
@@ -125,24 +122,19 @@ async fn handle_get_v2() -> Result<HttpResponse, Error> {
         }))
 }
 
-#[derive(Deserialize, Serialize)]
-struct RepositoryInfo {
-    repositories: Vec<String>,
-}
-
 #[get("/v2/_catalog")]
 async fn handle_v2_catalog(data: Data<AppState>) -> Result<Json<RepositoryInfo>, Error> {
     let storage_path = data.registry.storage_path.clone();
     let mut repositories = Vec::new();
-    if let Ok(read_dir) = fs::read_dir(storage_path) {
-        for path in read_dir.flatten() {
-            if let Ok(file_type) = path.file_type() {
-                if file_type.is_dir() {
-                    if let Ok(repo_name) = path.file_name().into_string() {
-                        repositories.push(repo_name);
-                    }
-                }
-            }
+    let read_dir = fs::read_dir(storage_path)?;
+
+    for path in read_dir.flatten() {
+        let file_type = path.file_type()?;
+        if file_type.is_dir() {
+            let repo_name = path.file_name()
+                .into_string()
+                .map_err(|_| { ErrorBadRequest(format!("invalid file name: {:?}", path.file_name().to_str())) })?;
+            repositories.push(repo_name);
         }
     }
     Ok(Json(RepositoryInfo { repositories }))
@@ -164,16 +156,20 @@ async fn handle_post(req: HttpRequest) -> Result<HttpResponse, MyError> {
         .finish())
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Serialize)]
+struct VersionInfo {
+    versions: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct RepositoryInfo {
+    repositories: Vec<String>,
+}
+
+#[derive(Deserialize)]
 struct ImageNameWithUUID {
     repo_name: String,
     uuid: String,
-}
-
-#[derive(Deserialize, Serialize)]
-struct ImageNameWithTag {
-    repo_name: String,
-    tag: String,
 }
 
 #[patch("/v2/{repo_name:.*}/blobs/uploads/{uuid}")]
@@ -182,7 +178,7 @@ async fn handle_patch(
     req: HttpRequest,
     mut payload: Payload,
 ) -> Result<HttpResponse, MyError> {
-    let upload_path = get_upload_path(&req, &format!("{}/blobs/uploads/{}", info.repo_name, info.uuid));
+    let upload_path = get_layer_path(&req, &format!("{}/blobs/uploads/{}", info.repo_name, info.uuid));
     let uploaded_file = write_payload_to_file(&mut payload, &upload_path).await?;
 
     Ok(HttpResponseBuilder::new(StatusCode::ACCEPTED)
@@ -192,6 +188,13 @@ async fn handle_patch(
         .finish())
 }
 
+
+#[derive(Deserialize)]
+struct ImageNameWithTag {
+    repo_name: String,
+    tag: String,
+}
+
 #[get("/v2/{repo_name:.*}/manifests/{tag}")]
 async fn handle_get_manifest_by_tag(
     req: HttpRequest,
@@ -199,9 +202,8 @@ async fn handle_get_manifest_by_tag(
 ) -> Result<HttpResponse, MyError> {
     let mut file = lookup_manifest_file(req, &info)?;
 
-    let mut buffer = Vec::new();
-
     // read file as string
+    let mut buffer = Vec::new();
     file.read_to_end(&mut buffer)?;
 
     let mut context = Context::new(&SHA256);
@@ -234,13 +236,6 @@ async fn handle_head_manifest_by_tag(
     Ok(HttpResponseBuilder::new(StatusCode::OK)
         .insert_header((CONTENT_LENGTH, metadata.len()))
         .finish())
-}
-
-fn lookup_manifest_file(req: HttpRequest, info: &ImageNameWithTag) -> Result<File, MyError> {
-    let manifest_path = get_layer_path(&req, &format!("{}/manifests/{}.json", info.repo_name, info.tag));
-    debug!("manifest_path: {}", manifest_path.display());
-    let file = File::open(manifest_path).map_err(map_to_not_found)?;
-    Ok(file)
 }
 
 #[derive(Deserialize, Serialize)]
@@ -308,13 +303,10 @@ async fn handle_put_with_digest(
     req: HttpRequest,
 ) -> Result<HttpResponse, MyError> {
     let layer_path = format!("{}/blobs/{}", info.repo_name, digest_param.digest);
-    let upload_path = get_upload_path(&req, &format!("{}/blobs/uploads/{}", info.repo_name, info.uuid));
+    let upload_path = get_layer_path(&req, &format!("{}/blobs/uploads/{}", info.repo_name, info.uuid));
     let path_to_file = get_layer_path(&req, &layer_path);
-    trace!(
-        "Moving upload_path: {} to path_to_file: {}",
-        upload_path.display(),
-        path_to_file.display()
-    );
+
+    trace!("Moving upload_path: {} to path_to_file: {}", upload_path.display(), path_to_file.display());
     fs::rename(upload_path, path_to_file).map_err(map_to_not_found)?;
 
     Ok(HttpResponseBuilder::new(StatusCode::CREATED)
@@ -331,23 +323,12 @@ async fn handle_put_manifest_by_tag(
     let manifest_path = get_layer_path(&req, &format!("{}/manifests/{}.json", info.repo_name, info.tag));
     debug!("manifest_path: {}", manifest_path.display());
 
-    let mut dir_builder = DirBuilder::new();
-    dir_builder.recursive(true).create(
-        manifest_path
-            .parent()
-            .ok_or(ErrorBadRequest("manifest_path has no parent"))?,
-    )?;
-
     let uploaded_path = write_payload_to_file(&mut payload, &manifest_path).await?;
 
     // manifest is stored as tag and sha256:digest
     let manifest_digest_path =
         get_layer_path(&req, &format!("{}/manifests/sha256:{}.json", info.repo_name, uploaded_path.sha256));
-    trace!(
-        "manifest_path: {} linked as {}",
-        &manifest_path.display(),
-        manifest_digest_path.display()
-    );
+    trace!("manifest_path: {} linked as {}", &manifest_path.display(), manifest_digest_path.display());
 
     // unlink the old manifest if it exists
     if manifest_digest_path.exists() {
@@ -357,10 +338,7 @@ async fn handle_put_manifest_by_tag(
 
     Ok(HttpResponseBuilder::new(StatusCode::CREATED)
         .insert_header(("Docker-Content-Digest", format!("sha256:{}", uploaded_path.sha256)))
-        .insert_header((
-            header::LOCATION,
-            format!("/v2/{}/manifests/{}", info.repo_name, info.tag),
-        ))
+        .insert_header((header::LOCATION, format!("/v2/{}/manifests/{}", info.repo_name, info.tag)))
         .finish())
 }
 
@@ -450,4 +428,43 @@ async fn main() -> std::io::Result<()> {
     }
 
     server.run().await
+}
+
+#[cfg(test)]
+mod tests {
+    use actix_web::{http::header::ContentType, test};
+
+    use super::*;
+
+    #[actix_web::test]
+    async fn test_get_upload_path() {
+        let req = test::TestRequest::default()
+            .insert_header(ContentType::plaintext())
+            .app_data(Data::new(AppState {
+                registry: Arc::new(Registry {
+                    storage_path: "/tmp".to_string(),
+                    port: 8080,
+                    tls_config: None,
+                }),
+            }))
+            .to_http_request();
+
+        let path = "foo/bar".to_string();
+        let upload_path = get_layer_path(&req, &path);
+        assert_eq!(upload_path, PathBuf::from("/tmp/foo/bar"));
+    }
+
+    #[actix_web::test]
+    async fn test_create_or_replace_file() {
+        let uuid = Uuid::new_v4();
+        let path_to_file = PathBuf::from(format!("/tmp/foo/bar/{}/sample", uuid));
+        assert!(path_to_file.metadata().is_err());
+
+        let manifest_file = create_or_replace_file(&path_to_file).unwrap();
+        assert!(manifest_file.metadata().unwrap().is_file());
+        assert_eq!(manifest_file.metadata().unwrap().len(), 0);
+        // delete path_to_file
+        fs::remove_file(&path_to_file).unwrap();
+        fs::remove_dir(path_to_file.parent().unwrap()).unwrap();
+    }
 }
