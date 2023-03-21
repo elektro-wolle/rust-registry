@@ -1,0 +1,20 @@
+version: '2.0'
+services:
+    ldap:
+        image: bitnami/openldap
+        ports:
+            - "11389:1389"
+        environment:
+            - LDAP_ORGANISATION=My Company
+            - LDAP_ROOT=dc=example,dc=com
+            - LDAP_DOMAIN=example.com
+            - LDAP_ADMIN_USERNAME=admin
+            - LDAP_ADMIN_PASSWORD=adminpassword
+    ui:
+        image: joxit/docker-registry-ui:latest
+        ports:
+            - 9080:80
+        environment:
+            - REGISTRY_TITLE=My Private Docker Registry
+            - REGISTRY_URL=http://pong:8080
+            - SINGLE_REGISTRY=true

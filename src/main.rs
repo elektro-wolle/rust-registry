@@ -22,7 +22,10 @@ use serde::{Deserialize, Serialize};
 use uuid::*;
 
 use crate::error::*;
+#[cfg(feature = "ldap")]
+use crate::ldap::*;
 
+mod ldap;
 mod error;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -31,6 +34,8 @@ struct Registry {
     #[serde(default = "default_http_port")]
     port: u16,
     tls_config: Option<TlsConfig>,
+    #[cfg(feature = "ldap")]
+    ldap_config: Option<LdapConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -406,6 +411,8 @@ pub async fn user_authorization_check(
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    env_logger::init_from_env(env_logger::Env::new().default_filter_or("debug"));
+
     let registry_config: Registry =
         serde_json::from_reader(File::open("config.json").unwrap()).unwrap();
     let tls_config = registry_config
@@ -415,7 +422,6 @@ async fn main() -> std::io::Result<()> {
     let http_port = registry_config.port;
     let https_port = registry_config.tls_config.as_ref().map(|cfg| cfg.port);
 
-    env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
     let app_data = Data::new(AppState {
         registry: Arc::new(registry_config),
     });
@@ -466,6 +472,8 @@ mod tests {
                     storage_path: "/tmp".to_string(),
                     port: 8080,
                     tls_config: None,
+                    #[cfg(feature = "ldap")]
+                    ldap_config: None,
                 }),
             }))
             .to_http_request();
@@ -487,5 +495,26 @@ mod tests {
         // delete path_to_file
         fs::remove_file(&path_to_file).unwrap();
         fs::remove_dir(path_to_file.parent().unwrap()).unwrap();
+    }
+
+    #[actix_web::test]
+    #[cfg(feature = "ldap")]
+    async fn test_ldap() {
+        env_logger::init_from_env(env_logger::Env::new().default_filter_or("debug"));
+        let cfg = LdapConfig {
+            ldap_url: "ldap://localhost:11389".to_string(),
+            bind_dn: "cn=admin,dc=example,dc=com".to_string(),
+            bind_password: "adminpassword".to_string(),
+            base_dn: "dc=example,dc=com".to_string(),
+            group_search_filter: "(&(objectClass=groupOfNames)(member={}))".to_string(),
+            group_attribute: "cn".to_string(),
+            user_search_filter: "(&(objectClass=inetOrgPerson)(uid={}))".to_string(),
+            group_search_base_dn: "dc=example,dc=com".to_string(),
+            user_search_base_dn: "dc=example,dc=com".to_string(),
+        };
+
+        let groups = authenticate_and_get_groups(&cfg, "user02", "bitnami2").await.unwrap();
+        assert_eq!(groups, vec!["readers"]);
+        info!("Groups: {:?}", groups);
     }
 }
