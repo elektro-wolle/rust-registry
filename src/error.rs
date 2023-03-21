@@ -18,15 +18,15 @@ pub struct AppErrors {
 }
 
 #[derive(Debug)]
-pub struct MyError {
+pub struct RegistryError {
     pub message: String,
     pub status_code: StatusCode,
     pub error_code: String,
 }
 
-impl MyError {
-    pub fn new(status_code: StatusCode, error_code: &str, message: &String) -> MyError {
-        MyError {
+impl RegistryError {
+    pub fn new(status_code: StatusCode, error_code: &str, message: &String) -> RegistryError {
+        RegistryError {
             message: message.to_string(),
             status_code,
             error_code: error_code.to_string(),
@@ -34,13 +34,13 @@ impl MyError {
     }
 }
 
-impl fmt::Display for MyError {
+impl fmt::Display for RegistryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:?}", self)
     }
 }
 
-impl ResponseError for MyError {
+impl ResponseError for RegistryError {
     //error_response and status_code are the provided methods for ResponseError Trait
 
     fn status_code(&self) -> StatusCode {
@@ -61,10 +61,10 @@ impl ResponseError for MyError {
     }
 }
 
-impl From<::actix_web::Error> for MyError {
-    fn from(error: ::actix_web::Error) -> MyError {
+impl From<::actix_web::Error> for RegistryError {
+    fn from(error: ::actix_web::Error) -> RegistryError {
         println!("error: {:?}", error);
-        MyError {
+        RegistryError {
             message: format!("error: {:?}", error),
             status_code: StatusCode::INTERNAL_SERVER_ERROR,
             error_code: "INTERNAL_SERVER_ERROR".to_string(),
@@ -72,10 +72,10 @@ impl From<::actix_web::Error> for MyError {
     }
 }
 
-impl From<PayloadError> for MyError {
-    fn from(error: PayloadError) -> MyError {
+impl From<PayloadError> for RegistryError {
+    fn from(error: PayloadError) -> RegistryError {
         println!("error: {:?}", error);
-        MyError {
+        RegistryError {
             message: format!("error reading stream: {:?}", error),
             status_code: StatusCode::INTERNAL_SERVER_ERROR,
             error_code: "INTERNAL_SERVER_ERROR".to_string(),
@@ -83,9 +83,9 @@ impl From<PayloadError> for MyError {
     }
 }
 
-impl From<std::io::Error> for MyError {
+impl From<std::io::Error> for RegistryError {
     fn from(err: std::io::Error) -> Self {
-        MyError {
+        RegistryError {
             message: format!("error: {:?}", err),
             status_code: StatusCode::INTERNAL_SERVER_ERROR,
             error_code: "INTERNAL_SERVER_ERROR".to_string(),
@@ -93,9 +93,9 @@ impl From<std::io::Error> for MyError {
     }
 }
 
-impl From<serde_json::Error> for MyError {
-    fn from(error: serde_json::Error) -> MyError {
-        MyError {
+impl From<serde_json::Error> for RegistryError {
+    fn from(error: serde_json::Error) -> RegistryError {
+        RegistryError {
             message: format!("json error: {:?}", error),
             status_code: StatusCode::INTERNAL_SERVER_ERROR,
             error_code: "INTERNAL_SERVER_ERROR".to_string(),
@@ -103,15 +103,15 @@ impl From<serde_json::Error> for MyError {
     }
 }
 
-pub fn map_to_not_found(err: std::io::Error) -> MyError {
+pub fn map_to_not_found(err: std::io::Error) -> RegistryError {
     if err.kind() == std::io::ErrorKind::NotFound {
-        MyError::new(
+        RegistryError::new(
             StatusCode::NOT_FOUND,
             "MANIFEST_UNKNOWN",
             &format!("file not found: {:?}", err),
         )
     } else {
-        MyError::new(
+        RegistryError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "UNKNOWN",
             &format!("file error: {:?}", err),

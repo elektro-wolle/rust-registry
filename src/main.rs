@@ -73,7 +73,7 @@ Upload file and calculate sha256
 async fn write_payload_to_file(
     payload: &mut Payload,
     target_path: &PathBuf,
-) -> Result<UploadedFile, MyError> {
+) -> Result<UploadedFile, RegistryError> {
     let mut manifest_file = create_or_replace_file(target_path)?;
     let mut context = Context::new(&SHA256);
     while let Some(chunk) = payload.next().await {
@@ -88,7 +88,7 @@ async fn write_payload_to_file(
     })
 }
 
-fn create_or_replace_file(path_to_file: &PathBuf) -> Result<File, MyError> {
+fn create_or_replace_file(path_to_file: &PathBuf) -> Result<File, RegistryError> {
     let mut dir_builder = DirBuilder::new();
     trace!("creating dir: {:?}, saving file {:?}", path_to_file.parent(), path_to_file);
 
@@ -106,7 +106,7 @@ fn create_or_replace_file(path_to_file: &PathBuf) -> Result<File, MyError> {
     Ok(manifest_file)
 }
 
-fn lookup_manifest_file(req: HttpRequest, info: &ImageNameWithTag) -> Result<File, MyError> {
+fn lookup_manifest_file(req: HttpRequest, info: &ImageNameWithTag) -> Result<File, RegistryError> {
     let manifest_path = get_layer_path(&req, &format!("{}/manifests/{}.json", info.repo_name, info.tag));
     debug!("manifest_path: {}", manifest_path.display());
     let file = File::open(manifest_path).map_err(map_to_not_found)?;
@@ -141,7 +141,7 @@ async fn handle_v2_catalog(data: Data<AppState>) -> Result<Json<RepositoryInfo>,
 }
 
 #[post("/v2/{repo_name:.*}/blobs/uploads/")]
-async fn handle_post(req: HttpRequest) -> Result<HttpResponse, MyError> {
+async fn handle_post(req: HttpRequest) -> Result<HttpResponse, RegistryError> {
     let repo_name = req
         .match_info()
         .get("repo_name")
@@ -177,7 +177,7 @@ async fn handle_patch(
     info: web::Path<ImageNameWithUUID>,
     req: HttpRequest,
     mut payload: Payload,
-) -> Result<HttpResponse, MyError> {
+) -> Result<HttpResponse, RegistryError> {
     let upload_path = get_layer_path(&req, &format!("{}/blobs/uploads/{}", info.repo_name, info.uuid));
     let uploaded_file = write_payload_to_file(&mut payload, &upload_path).await?;
 
@@ -199,7 +199,7 @@ struct ImageNameWithTag {
 async fn handle_get_manifest_by_tag(
     req: HttpRequest,
     info: web::Path<ImageNameWithTag>,
-) -> Result<HttpResponse, MyError> {
+) -> Result<HttpResponse, RegistryError> {
     let mut file = lookup_manifest_file(req, &info)?;
 
     // read file as string
@@ -223,11 +223,11 @@ async fn handle_get_manifest_by_tag(
 async fn handle_head_manifest_by_tag(
     req: HttpRequest,
     info: web::Path<ImageNameWithTag>,
-) -> Result<HttpResponse, MyError> {
+) -> Result<HttpResponse, RegistryError> {
     let file = lookup_manifest_file(req, &info)?;
     let metadata = file.metadata()?;
     if metadata.len() == 0 || metadata.is_dir() {
-        return Err(MyError::new(
+        return Err(RegistryError::new(
             StatusCode::NOT_FOUND,
             "MANIFEST_UNKNOWN",
             &format!("Manifest {:?} not found", file),
@@ -248,14 +248,14 @@ struct ImageNameWithDigest {
 async fn handle_get_layer_by_hash(
     req: HttpRequest,
     info: web::Path<ImageNameWithDigest>,
-) -> Result<HttpResponse, MyError> {
+) -> Result<HttpResponse, RegistryError> {
     let layer_path = get_layer_path(&req, &format!("{}/{}", info.repo_name, info.digest));
     let file = actix_files::NamedFile::open_async(&layer_path)
         .await
         .map_err(map_to_not_found)?;
 
     if file.metadata().is_dir() {
-        return Err(MyError::new(
+        return Err(RegistryError::new(
             StatusCode::NOT_FOUND,
             "LAYER_UNKNOWN",
             &format!("file {} for {} not found: is a directory", info.digest, info.repo_name),
@@ -269,7 +269,7 @@ async fn handle_get_layer_by_hash(
 async fn handle_head_layer_by_hash(
     req: HttpRequest,
     info: web::Path<ImageNameWithDigest>,
-) -> Result<HttpResponse, MyError> {
+) -> Result<HttpResponse, RegistryError> {
     let layer_path = get_layer_path(&req, &format!("{}/blobs/{}", info.repo_name, info.digest));
     trace!("head: layer_path: {}", layer_path.display());
 
@@ -278,7 +278,7 @@ async fn handle_head_layer_by_hash(
         .map_err(map_to_not_found)?;
 
     if file.metadata().is_dir() {
-        return Err(MyError::new(
+        return Err(RegistryError::new(
             StatusCode::NOT_FOUND,
             "LAYER_UNKNOWN",
             &format!("file {} for {} not found: is a directory", info.digest, info.repo_name),
@@ -301,7 +301,7 @@ async fn handle_put_with_digest(
     digest_param: web::Query<DigestParam>,
     info: web::Path<ImageNameWithUUID>,
     req: HttpRequest,
-) -> Result<HttpResponse, MyError> {
+) -> Result<HttpResponse, RegistryError> {
     let layer_path = format!("{}/blobs/{}", info.repo_name, digest_param.digest);
     let upload_path = get_layer_path(&req, &format!("{}/blobs/uploads/{}", info.repo_name, info.uuid));
     let path_to_file = get_layer_path(&req, &layer_path);
@@ -319,7 +319,7 @@ async fn handle_put_manifest_by_tag(
     req: HttpRequest,
     info: web::Path<ImageNameWithTag>,
     mut payload: Payload,
-) -> Result<HttpResponse, MyError> {
+) -> Result<HttpResponse, RegistryError> {
     let manifest_path = get_layer_path(&req, &format!("{}/manifests/{}.json", info.repo_name, info.tag));
     debug!("manifest_path: {}", manifest_path.display());
 
