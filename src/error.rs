@@ -4,12 +4,14 @@ use actix_web::{HttpResponse, HttpResponseBuilder};
 use actix_web::error::{PayloadError, ResponseError};
 use actix_web::http::header::ContentType;
 use actix_web::http::StatusCode;
+use log::debug;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AppError {
     pub code: String,
     pub message: String,
+    pub detail: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -52,18 +54,23 @@ impl ResponseError for RegistryError {
             errors: vec![AppError {
                 code: self.error_code.to_string(),
                 message: self.message.to_string(),
+                detail: None,
             }],
         };
-        println!("error: {:?}", errors);
-        HttpResponseBuilder::new(self.status_code)
-            .insert_header(ContentType::json())
-            .json(errors)
+        debug!("error: {:?}", errors);
+        let mut http_response_builder = HttpResponseBuilder::new(self.status_code);
+        let mut resp = http_response_builder.insert_header(ContentType::json());
+        resp = resp.insert_header(("Docker-Distribution-Api-Version", "registry/2.0"));
+        if self.status_code == StatusCode::UNAUTHORIZED {
+            resp = resp.insert_header(("WWW-Authenticate", "BASIC realm=\"registry\""));
+        }
+        resp.json(errors)
     }
 }
 
 impl From<::actix_web::Error> for RegistryError {
     fn from(error: ::actix_web::Error) -> RegistryError {
-        println!("error: {:?}", error);
+        debug!("error: {:?}", error);
         RegistryError {
             message: format!("error: {:?}", error),
             status_code: StatusCode::INTERNAL_SERVER_ERROR,
@@ -74,7 +81,7 @@ impl From<::actix_web::Error> for RegistryError {
 
 impl From<PayloadError> for RegistryError {
     fn from(error: PayloadError) -> RegistryError {
-        println!("error: {:?}", error);
+        debug!("error: {:?}", error);
         RegistryError {
             message: format!("error reading stream: {:?}", error),
             status_code: StatusCode::INTERNAL_SERVER_ERROR,

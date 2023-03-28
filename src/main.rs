@@ -4,14 +4,17 @@ use std::io::prelude::*;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use actix_web::{App, Error, get, head, http::header, HttpRequest, HttpResponse, HttpResponseBuilder, HttpServer, middleware, patch, post, put, Result, web};
+use actix_web::{App, Error, get, head, http::header, HttpMessage, HttpRequest, HttpResponse, HttpResponseBuilder, HttpServer, middleware, patch, post, put, Result, web};
 use actix_web::dev::ServiceRequest;
-use actix_web::error::ErrorBadRequest;
+use actix_web::error::{ErrorBadRequest, ErrorForbidden, ErrorUnauthorized};
+use actix_web::http::{Method, StatusCode};
 use actix_web::http::header::CONTENT_LENGTH;
-use actix_web::http::StatusCode;
+use actix_web::middleware::ErrorHandlers;
 use actix_web::web::{Data, Json, Payload};
 use actix_web_httpauth::extractors::bearer::BearerAuth;
 use actix_web_httpauth::middleware::HttpAuthentication;
+use base64::{alphabet, engine, Engine};
+use base64::engine::general_purpose;
 use futures_util::StreamExt;
 use log::{debug, info, trace};
 use path_clean::PathClean;
@@ -57,6 +60,13 @@ fn default_https_port() -> u16 {
 struct AppState {
     registry: Arc<Registry>,
 }
+
+#[derive(Debug, Clone, Deserialize)]
+struct UserRoles {
+    username: String,
+    roles: Vec<String>,
+}
+
 
 struct UploadedFile {
     sha256: String,
@@ -119,7 +129,20 @@ fn lookup_manifest_file(req: HttpRequest, info: &ImageNameWithTag) -> Result<Fil
 }
 
 #[get("/v2/")]
-async fn handle_get_v2() -> Result<HttpResponse, Error> {
+async fn handle_get_v2(req: HttpRequest) -> Result<HttpResponse, Error> {
+    let ext = req.extensions();
+    let o = ext.get::<UserRoles>();
+    info!("o: {:?}", o);
+    match o {
+        Some(user_with_roles) => {
+            info!("userWithRoles: {:?}", user_with_roles);
+        }
+        None => {
+            info!("userWithRoles: None");
+        }
+    }
+    //let userWithRoles = req.extensions_mut().get::<Box<UserRoles>>().unwrap();
+
     Ok(HttpResponseBuilder::new(StatusCode::OK)
         .insert_header(("Docker-Distribution-API-Version", "registry/2.0"))
         .json(VersionInfo {
@@ -353,6 +376,7 @@ async fn handle_default(req: HttpRequest) -> HttpResponse {
         errors: vec![AppError {
             code: "UNSUPPORTED".to_string(),
             message: "Unsupported operation".to_string(),
+            detail: None,
         }],
     };
     HttpResponseBuilder::new(StatusCode::NOT_FOUND).json(errors)
@@ -389,24 +413,61 @@ fn load_rustls_config(tls_config: &TlsConfig) -> ServerConfig {
     config.with_single_cert(cert_chain, keys.remove(0)).unwrap()
 }
 
+async fn _authenticate_user(
+    basic_auth: Option<String>,
+    _bearer_auth: Option<String>,
+) -> Result<UserRoles, RegistryError> {
+    let auth = basic_auth.ok_or_else(|| RegistryError::new(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", &"Unauthorized, no basic auth".to_string()))?;
+
+    let engine = engine::GeneralPurpose::new(&alphabet::URL_SAFE, general_purpose::PAD);
+    let decoded = engine
+        .decode(auth.as_bytes())
+        .map_err(|_| RegistryError::new(StatusCode::FORBIDDEN, "FORBIDDEN", &"Unauthorized, invalid base64".to_string()))?;
+
+    let decoded_str = String::from_utf8(decoded)
+        .map_err(|_| RegistryError::new(StatusCode::FORBIDDEN, "FORBIDDEN", &"Unauthorized, invalid utf8".to_string()))?;
+
+    let parts: Vec<&str> = decoded_str.split(':').collect();
+
+    if parts.len() != 2 {
+        return Err(RegistryError::new(StatusCode::FORBIDDEN, "FORBIDDEN", &"Unauthorized, wrong format".to_string()));
+    }
+
+    let username = parts[0].to_string();
+    let password = parts[1].to_string();
+
+    let roles = vec!["admin".to_string()];
+
+    Ok(UserRoles { username, roles })
+}
+
 pub async fn user_authorization_check(
     req: ServiceRequest,
     credentials: Option<BearerAuth>,
 ) -> Result<ServiceRequest, (Error, ServiceRequest)> {
-    let basic_auth: Option<String> =
-        match req.headers().get("authorization") {
-            Some(h) if !h.is_empty() && h.to_str().is_ok() => {
-                let auth = h.to_str().unwrap();
-                auth.strip_prefix("Basic ")
-                    .map(|s| s.to_string())
-            }
-            _ => None
-        };
-    let bearer_auth = credentials.map(|c| { c.token().to_string() });
+    //debug!("{:#?} Request to {}", req.method(), req.path());
 
-    trace!("user_authorization_check: basic: {:?}, bearer: {:?}", basic_auth, bearer_auth);
-    Ok(req)
-    //Err((ErrorUnauthorized("Unauthorized"), req))
+    let basic_auth: Option<String> = req
+        .headers()
+        .get("authorization")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|auth| auth.strip_prefix("Basic "))
+        .map(|s| s.to_string());
+
+    let bearer_auth = credentials.map(|c| c.token().to_string());
+    debug!(
+        "user_authorization_check: basic: {:?}, bearer: {:?}",
+        basic_auth, bearer_auth
+    );
+
+    match _authenticate_user(basic_auth, bearer_auth).await {
+        Ok(user) => {
+            req.extensions_mut().insert(user);
+            Ok(req)
+        }
+        Err(e) =>
+            Err((e.into(), req)),
+    }
 }
 
 #[actix_web::main]
