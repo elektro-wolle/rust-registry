@@ -6,10 +6,9 @@ use std::sync::Arc;
 
 use actix_web::{App, Error, get, head, http::header, HttpMessage, HttpRequest, HttpResponse, HttpResponseBuilder, HttpServer, middleware, patch, post, put, Result, web};
 use actix_web::dev::ServiceRequest;
-use actix_web::error::{ErrorBadRequest, ErrorForbidden, ErrorUnauthorized};
-use actix_web::http::{Method, StatusCode};
+use actix_web::error::ErrorBadRequest;
+use actix_web::http::StatusCode;
 use actix_web::http::header::CONTENT_LENGTH;
-use actix_web::middleware::ErrorHandlers;
 use actix_web::web::{Data, Json, Payload};
 use actix_web_httpauth::extractors::bearer::BearerAuth;
 use actix_web_httpauth::middleware::HttpAuthentication;
@@ -414,6 +413,7 @@ fn load_rustls_config(tls_config: &TlsConfig) -> ServerConfig {
 }
 
 async fn _authenticate_user(
+    req: &ServiceRequest,
     basic_auth: Option<String>,
     _bearer_auth: Option<String>,
 ) -> Result<UserRoles, RegistryError> {
@@ -436,9 +436,37 @@ async fn _authenticate_user(
     let username = parts[0].to_string();
     let password = parts[1].to_string();
 
-    let roles = vec!["admin".to_string()];
+    let app_config = req.app_data::<Data<AppState>>();
+    let reg_arc = app_config.unwrap().registry.as_ref();
+    let ldap = reg_arc.ldap_config.as_ref();
 
-    Ok(UserRoles { username, roles })
+    match ldap {
+        Some(ldap) => {
+            let roles = authenticate_and_get_groups(
+                &ldap,
+                &username,
+                &password).await
+                .map_err(|e| {
+                    RegistryError::new(
+                        StatusCode::FORBIDDEN,
+                        "FORBIDDEN",
+                        &format!("Unauthorized, ldap error: {}", e),
+                    )
+                })?;
+            if roles.is_empty() {
+                Err(RegistryError::new(
+                    StatusCode::FORBIDDEN,
+                    "FORBIDDEN",
+                    &"Unauthorized, no ldap groups".to_string()))
+            } else {
+                Ok(UserRoles { username, roles })
+            }
+        }
+        _ => Err(RegistryError::new(
+            StatusCode::FORBIDDEN,
+            "FORBIDDEN",
+            &"Unauthorized, no ldap config".to_string()))
+    }
 }
 
 pub async fn user_authorization_check(
@@ -455,12 +483,12 @@ pub async fn user_authorization_check(
         .map(|s| s.to_string());
 
     let bearer_auth = credentials.map(|c| c.token().to_string());
-    debug!(
+    trace!(
         "user_authorization_check: basic: {:?}, bearer: {:?}",
         basic_auth, bearer_auth
     );
 
-    match _authenticate_user(basic_auth, bearer_auth).await {
+    match _authenticate_user(&req, basic_auth, bearer_auth).await {
         Ok(user) => {
             req.extensions_mut().insert(user);
             Ok(req)
@@ -472,7 +500,7 @@ pub async fn user_authorization_check(
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    env_logger::init_from_env(env_logger::Env::new().default_filter_or("debug"));
+    env_logger::init_from_env(env_logger::Env::new().default_filter_or("info,rust_registry=trace"));
 
     let registry_config: Registry =
         serde_json::from_reader(File::open("config.json").unwrap()).unwrap();

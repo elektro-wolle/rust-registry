@@ -30,9 +30,10 @@ Currently, only the basic functionality is implemented. The following features a
 - [x] add CORS Headers
 - [ ] add /v2/_catalog listing
 - [ ] add /v2/<name>/tags/list
-- [ ] basic auth credentials
+- [x] basic auth credentials
 - [x] ldap auth
-- [ ] `docker login` with username and password
+- [ ] make ldap search configurable
+- [x] `docker login` with username and password
 - [x] sha256 checks
 - [x] Streaming upload
 - [x] Streaming download

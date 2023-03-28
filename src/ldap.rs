@@ -2,6 +2,7 @@
 use ldap3::{Ldap, LdapConnAsync, Scope, SearchEntry};
 #[cfg(feature = "ldap")]
 use ldap3::result::Result;
+use log::{info, trace, warn};
 #[cfg(feature = "ldap")]
 use log::debug;
 #[cfg(feature = "ldap")]
@@ -49,20 +50,6 @@ async fn find_user_dn(
             Ok(None)
         }
     }
-    // let r = SearchEntry::construct(search_results[0]);
-    //
-
-    // if let Some(user_entry) = search_results.into_iter().next() {
-    //     Ok(user_entry.dn)
-    // } else {
-    //     Err("User not found".into())
-    // }
-
-    // if let Some(user_entry) = search_results.into_iter().next() {
-    //     Ok(user_entry.dn)
-    // } else {
-    //     Err("User not found".into())
-    // }
 }
 
 #[cfg(feature = "ldap")]
@@ -73,19 +60,23 @@ async fn get_user_groups(
 ) -> Result<Vec<String>> {
     // let filter = format!(ldap_config.group_search_filter, user_dn);
     let filter = format!("(&(objectClass=groupOfNames)(member={}))", user_dn);
-    debug!("Searching for groups for user {}", &filter);
+    trace!("Searching for groups for user {}", &filter);
+    let group_attribute = ldap_config.group_attribute.as_str();
     let (search_results, _res) = ldap
-        .search(&ldap_config.base_dn, Scope::Subtree, &filter, vec!["cn"])
+        .search(&ldap_config.base_dn, Scope::Subtree, &filter, vec![group_attribute])
         .await?.success()?;
 
     let groups: Vec<String> = search_results
         .into_iter()
         .map(SearchEntry::construct)
         .map(|entry| {
-            debug!("Found group: {:?}", entry);
+            trace!("Found group: {:?}", entry);
             entry
         })
-        .filter_map(|entry| entry.attrs.get("cn").and_then(|vals| vals.first().cloned()))
+        .filter_map(|entry|
+            entry.attrs.get(group_attribute)
+                .and_then(|vals|
+                    vals.first().cloned()))
         .collect();
 
     Ok(groups)
@@ -97,17 +88,21 @@ pub async fn authenticate_and_get_groups(
     user_uid: &str,
     user_password: &str,
 ) -> Result<Vec<String>> {
-    debug!("opening ldap connection");
+    trace!("opening ldap connection");
     let (conn, mut ldap) = LdapConnAsync::new(&ldap_config.ldap_url)
         .await?;
     ldap3::drive!(conn);
 
-    debug!("bind ldap connection");
+    trace!("bind ldap connection");
     let bound = ldap.simple_bind(&ldap_config.bind_dn, user_password).await;
-
-    debug!("searching bound={:?}, user {}", bound, &user_uid);
+    trace!("searching bound={:?}, user {}", bound, &user_uid);
+    if bound.is_err() {
+        warn!("bind failed");
+        return Ok(vec![]);
+    }
 
     let user_dn = find_user_dn(&mut ldap, ldap_config, &user_uid).await?;
+
     match user_dn {
         None => {
             debug!("No user found");
@@ -115,46 +110,14 @@ pub async fn authenticate_and_get_groups(
         }
         Some(user_dn) => {
             debug!("found user {}", &user_dn);
-            ldap.simple_bind(&user_dn, user_password).await?;
-            debug!("bound user {}", &user_dn);
+            let try_to_bind = ldap.simple_bind(&user_dn, user_password).await?;
+            if try_to_bind.rc != 0 {
+                info!("bind failed for user {}", &user_dn);
+                return Ok(vec![]);
+            }
             let groups = get_user_groups(&mut ldap, ldap_config, &user_dn).await?;
-            debug!("got groups {:?}", &groups);
-            // ldap.unbind().await?;
+            debug!("got groups {:?} for user {}", &groups, &user_uid);
             Ok(groups)
         }
     }
-    // if user_dn.is_none() {
-    //     return Ok(vec![]);
-    // }
-    //
-    // ldap.simple_bind(&user_dn, &user_password).await?;
-    // let groups = get_user_groups(&mut ldap, &ldap_config, &user_dn).await?;
-    //
-    // Ok(groups)
 }
-//
-// #[tokio::main]
-// async fn main() {
-//     let ldap_url = "ldap://ldap.example.com";
-//     let bind_dn = "cn=admin,dc=example,dc=com";
-//     let bind_password = "admin_password";
-//     let user_uid = "user@example.com";
-//     let user_password = "user_password";
-//     let user_base_dn = "ou=users,dc=example,dc=com";
-//     let group_base_dn = "ou=groups,dc=example,dc=com";
-//
-//     match authenticate_and_get_groups(
-//         ldap_url,
-//         bind_dn,
-//         bind_password,
-//         user_uid,
-//         user_password,
-//         user_base_dn,
-//         group_base_dn,
-//     )
-//         .await
-//     {
-//         Ok(groups) => println!("Groups: {:?}", groups),
-//         Err(err) => println!("Error: {}", err),
-//     }
-// }
