@@ -271,7 +271,7 @@ struct ImageNameWithDigest {
     digest: String,
 }
 
-#[get("/v2/{repo_name:.*}/{sha}")]
+#[get("/v2/{repo_name:.*}/{digest}")]
 async fn handle_get_layer_by_hash(
     req: HttpRequest,
     info: web::Path<ImageNameWithDigest>,
@@ -292,7 +292,7 @@ async fn handle_get_layer_by_hash(
     Ok(file.into_response(&req))
 }
 
-#[head("/v2/{repo_name:.*}/blobs/{sha}")]
+#[head("/v2/{repo_name:.*}/blobs/{digest}")]
 async fn handle_head_layer_by_hash(
     req: HttpRequest,
     info: web::Path<ImageNameWithDigest>,
@@ -527,10 +527,10 @@ async fn main() -> std::io::Result<()> {
             .service(handle_v2_catalog)
             .service(handle_post)
             .service(handle_patch)
+            .service(handle_head_layer_by_hash)
             .service(handle_head_manifest_by_tag)
             .service(handle_get_manifest_by_tag)
             .service(handle_get_layer_by_hash)
-            .service(handle_head_layer_by_hash)
             .service(handle_put_with_digest)
             .service(handle_put_manifest_by_tag)
             .default_service(web::route().to(handle_default))

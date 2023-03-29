@@ -30,6 +30,7 @@ Currently, only the basic functionality is implemented. The following features a
 - [x] add CORS Headers
 - [ ] add /v2/_catalog listing
 - [ ] add /v2/<name>/tags/list
+- [x] HEAD /v2/<name>/blobs/sha256:<digest>
 - [x] basic auth credentials
 - [x] ldap auth
 - [x] make ldap search configurable
