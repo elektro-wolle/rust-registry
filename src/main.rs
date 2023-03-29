@@ -553,23 +553,33 @@ mod tests {
     use super::*;
 
     #[actix_web::test]
+    async fn init_logger() {
+        env_logger::init_from_env(env_logger::Env::new().default_filter_or("debug,rust_registry=trace"));
+    }
+
+
+    #[actix_web::test]
     async fn test_get_upload_path() {
         let req = test::TestRequest::default()
             .insert_header(ContentType::plaintext())
-            .app_data(Data::new(AppState {
-                registry: Arc::new(Registry {
-                    storage_path: "/tmp".to_string(),
-                    port: 8080,
-                    tls_config: None,
-                    #[cfg(feature = "ldap")]
-                    ldap_config: None,
-                }),
-            }))
+            .app_data(build_app_data())
             .to_http_request();
 
         let path = "foo/bar".to_string();
         let upload_path = get_layer_path(&req, &path);
         assert_eq!(upload_path, PathBuf::from("/tmp/foo/bar"));
+    }
+
+    fn build_app_data() -> Data<AppState> {
+        Data::new(AppState {
+            registry: Arc::new(Registry {
+                storage_path: "/tmp".to_string(),
+                port: 8080,
+                tls_config: None,
+                #[cfg(feature = "ldap")]
+                ldap_config: None,
+            }),
+        })
     }
 
     #[actix_web::test]
@@ -587,9 +597,38 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn test_put_upload() {
+        let uuid = Uuid::new_v4();
+
+        let path_to_file = PathBuf::from(format!("/tmp/foo/bar/blobs/uploads/{}", uuid));
+        let file_to_move = create_or_replace_file(&path_to_file).unwrap();
+
+        let path_to_target_file = PathBuf::from("/tmp/foo/bar/blobs/123");
+        fs::remove_file(&path_to_target_file).unwrap_or(());
+        assert!(!path_to_target_file.exists());
+
+        let app = test::init_service(
+            App::new()
+                .app_data(build_app_data())
+                .service(handle_put_with_digest)
+        )
+            .await;
+        let req =
+            test::TestRequest::put()
+                .uri(format!("/v2/foo/bar/blobs/uploads/{}?digest=123", uuid).as_str())
+                .to_request();
+
+        let resp = test::call_service(&app, req).await;
+
+        assert!(path_to_target_file.exists());
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        fs::remove_file(&path_to_target_file).unwrap_or(());
+    }
+
+
+    #[actix_web::test]
     #[cfg(feature = "ldap")]
     async fn test_ldap() {
-        env_logger::init_from_env(env_logger::Env::new().default_filter_or("debug"));
         let cfg = LdapConfig {
             ldap_url: "ldap://localhost:11389".to_string(),
             bind_dn: "cn=admin,dc=example,dc=com".to_string(),
