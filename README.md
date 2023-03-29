@@ -32,7 +32,7 @@ Currently, only the basic functionality is implemented. The following features a
 - [ ] add /v2/<name>/tags/list
 - [x] basic auth credentials
 - [x] ldap auth
-- [ ] make ldap search configurable
+- [x] make ldap search configurable
 - [x] `docker login` with username and password
 - [x] sha256 checks
 - [x] Streaming upload

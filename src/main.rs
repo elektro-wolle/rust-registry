@@ -7,8 +7,8 @@ use std::sync::Arc;
 use actix_web::{App, Error, get, head, http::header, HttpMessage, HttpRequest, HttpResponse, HttpResponseBuilder, HttpServer, middleware, patch, post, put, Result, web};
 use actix_web::dev::ServiceRequest;
 use actix_web::error::ErrorBadRequest;
-use actix_web::http::StatusCode;
 use actix_web::http::header::CONTENT_LENGTH;
+use actix_web::http::StatusCode;
 use actix_web::web::{Data, Json, Payload};
 use actix_web_httpauth::extractors::bearer::BearerAuth;
 use actix_web_httpauth::middleware::HttpAuthentication;
@@ -598,8 +598,8 @@ mod tests {
             group_search_filter: "(&(objectClass=groupOfNames)(member={}))".to_string(),
             group_attribute: "cn".to_string(),
             user_search_filter: "(&(objectClass=inetOrgPerson)(uid={}))".to_string(),
-            group_search_base_dn: "dc=example,dc=com".to_string(),
-            user_search_base_dn: "dc=example,dc=com".to_string(),
+            group_search_base_dn: Some("dc=example,dc=com".to_string()),
+            user_search_base_dn: Some("dc=example,dc=com".to_string()),
         };
 
         let groups = authenticate_and_get_groups(&cfg, "user02", "bitnami2").await.unwrap();
