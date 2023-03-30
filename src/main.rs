@@ -15,12 +15,14 @@ use actix_web_httpauth::middleware::HttpAuthentication;
 use base64::{alphabet, engine, Engine};
 use base64::engine::general_purpose;
 use futures_util::StreamExt;
+use lazy_static::lazy_static;
 use log::{debug, info, trace};
 use path_clean::PathClean;
 use ring::digest::{Context, SHA256};
 use rustls::{Certificate, PrivateKey, ServerConfig};
 use rustls_pemfile::{certs, rsa_private_keys};
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
 use uuid::*;
 
 use crate::error::*;
@@ -323,6 +325,7 @@ struct DigestParam {
     digest: String,
 }
 
+
 #[put("/v2/{repo_name:.*}/blobs/uploads/{uuid}")]
 async fn handle_put_with_digest(
     digest_param: web::Query<DigestParam>,
@@ -333,6 +336,7 @@ async fn handle_put_with_digest(
     let upload_path = get_layer_path(&req, &format!("{}/blobs/uploads/{}", info.repo_name, info.uuid));
     let path_to_file = get_layer_path(&req, &layer_path);
 
+    // mutex to prevent concurrent writes to the same file
     trace!("Moving upload_path: {} to path_to_file: {}", upload_path.display(), path_to_file.display());
     fs::rename(upload_path, path_to_file).map_err(map_to_not_found)?;
 
@@ -347,6 +351,10 @@ async fn handle_put_manifest_by_tag(
     info: web::Path<ImageNameWithTag>,
     mut payload: Payload,
 ) -> Result<HttpResponse, RegistryError> {
+    lazy_static! {
+        static ref LOCK_MUTEX:Mutex<u16> = Mutex::new(0);
+    }
+
     let manifest_path = get_layer_path(&req, &format!("{}/manifests/{}.json", info.repo_name, info.tag));
     debug!("manifest_path: {}", manifest_path.display());
 
@@ -357,11 +365,13 @@ async fn handle_put_manifest_by_tag(
         get_layer_path(&req, &format!("{}/manifests/sha256:{}.json", info.repo_name, uploaded_path.sha256));
     trace!("manifest_path: {} linked as {}", &manifest_path.display(), manifest_digest_path.display());
 
-    // unlink the old manifest if it exists
+    // lock to prevent concurrent writes to the same file
+    let lock = LOCK_MUTEX.lock().await;
     if manifest_digest_path.exists() {
         fs::remove_file(&manifest_digest_path)?;
     }
     fs::hard_link(&manifest_path, &manifest_digest_path)?;
+    drop(lock);
 
     Ok(HttpResponseBuilder::new(StatusCode::CREATED)
         .insert_header(("Docker-Content-Digest", format!("sha256:{}", uploaded_path.sha256)))

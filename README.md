@@ -33,12 +33,11 @@ Currently, only the basic functionality is implemented. The following features a
 - [x] ldap auth
 - [x] make ldap search configurable
 - [x] `docker login` with username and password
-- [ ] add `docker login` token support
 - [x] sha256 checks
 - [x] Streaming upload
 - [x] Streaming download
 - [ ] add tests, based on https://github.com/ecarrara/oci-registry-client
-- [ ] add synchronisation for concurrent uploads
+- [x] add synchronisation for concurrent uploads
 - [ ] add virtual host support
 - [ ] add support for multiple registries in one instance
 - [ ] add proxying request to other registries
@@ -52,13 +51,14 @@ Currently, only the basic functionality is implemented. The following features a
 - [ ] add /v2/<name>/tags/list
 - [ ] config file for auth and storage backends
 - [ ] add DELETE Endpoints
-- [ ] make trait for auth backend
 - [ ] make trait for storage backend
 - [ ] implement storage backend for local fs
 - [ ] implement storage backend for s3
 - [x] add tls support
 - [ ] semver parsing for tags, keeping the latest x-major, y-minor, z-patch versions
 - [ ] cleanup-jobs for removing old images/manifests
+- [ ] make trait for auth backend
+- [ ] add `docker login` token support
 
 # License
 
