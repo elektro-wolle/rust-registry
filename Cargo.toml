@@ -33,3 +33,4 @@ log = "0.4.17"
 ldap3 = { version = "0.11.1", features = ["rustls"] }
 tokio = { version = "1.26.0", features = ["full"] }
 lazy_static = "1.4.0"
+futures = "0.3.28"

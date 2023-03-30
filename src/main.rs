@@ -33,11 +33,16 @@ mod ldap;
 mod error;
 
 #[derive(Debug, Clone, Deserialize)]
-struct Registry {
+struct Repository {
     storage_path: String,
     #[serde(default = "default_http_port")]
-    port: u16,
+    bind_address: String,
     tls_config: Option<TlsConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct Registry {
+    repositories: Vec<Repository>,
     #[cfg(feature = "ldap")]
     ldap_config: Option<LdapConfig>,
 }
@@ -47,15 +52,15 @@ struct TlsConfig {
     cert: String,
     key: String,
     #[serde(default = "default_https_port")]
-    port: u16,
+    bind_address: String,
 }
 
-fn default_http_port() -> u16 {
-    8080
+fn default_http_port() -> String {
+    "[::]:8080".to_string()
 }
 
-fn default_https_port() -> u16 {
-    8443
+fn default_https_port() -> String {
+    "[::]:8443".to_string()
 }
 
 struct AppState {
@@ -63,11 +68,11 @@ struct AppState {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 struct UserRoles {
     username: String,
     roles: Vec<String>,
 }
-
 
 struct UploadedFile {
     sha256: String,
@@ -75,10 +80,11 @@ struct UploadedFile {
 }
 
 fn get_layer_path(_req: &HttpRequest, path: &String) -> PathBuf {
-    let registry = _req.app_data::<Data<AppState>>().unwrap().registry.clone();
+    let extensions = _req.extensions();
+    let repo: &Repository = extensions.get().unwrap();
     // clean() will remove any "." and ".." from the path
     let sub_path = PathBuf::from(format!("/{}", path)).clean();
-    let target_path = format!("{}/{}", registry.storage_path, sub_path.display());
+    let target_path = format!("{}/{}", repo.storage_path, sub_path.display());
     // second clean() to ensure that the path is clean
     PathBuf::from(target_path).clean()
 }
@@ -152,8 +158,11 @@ async fn handle_get_v2(req: HttpRequest) -> Result<HttpResponse, Error> {
 }
 
 #[get("/v2/_catalog")]
-async fn handle_v2_catalog(data: Data<AppState>) -> Result<Json<RepositoryInfo>, Error> {
-    let storage_path = data.registry.storage_path.clone();
+async fn handle_v2_catalog(req: HttpRequest) -> Result<Json<RepositoryInfo>, Error> {
+    let ext = req.extensions();
+    let repo = ext.get::<Repository>().unwrap();
+
+    let storage_path = &repo.storage_path;
     let mut repositories = Vec::new();
     let read_dir = fs::read_dir(storage_path)?;
 
@@ -453,7 +462,7 @@ async fn _authenticate_user(
     match ldap {
         Some(ldap) => {
             let roles = authenticate_and_get_groups(
-                &ldap,
+                ldap,
                 &username,
                 &password).await
                 .map_err(|e| {
@@ -483,7 +492,7 @@ pub async fn user_authorization_check(
     req: ServiceRequest,
     credentials: Option<BearerAuth>,
 ) -> Result<ServiceRequest, (Error, ServiceRequest)> {
-    //debug!("{:#?} Request to {}", req.method(), req.path());
+    let req = insert_resolved_repo(req)?;
 
     let basic_auth: Option<String> = req
         .headers()
@@ -508,24 +517,45 @@ pub async fn user_authorization_check(
     }
 }
 
+fn insert_resolved_repo(req: ServiceRequest) -> Result<ServiceRequest, (Error, ServiceRequest)> {
+    let request_host = req.app_config().host();
+    let is_tls = req.app_config().secure();
+    let reg = req.app_data::<Data<AppState>>().unwrap();
+    let app_config = reg.registry.as_ref();
+
+    let repo = if is_tls {
+        app_config.repositories.iter().find(|&r| {
+            let tls_cfg = r.tls_config.as_ref().unwrap();
+            tls_cfg.bind_address == request_host
+        })
+    } else {
+        app_config.repositories.iter().find(|&r| r.bind_address == request_host)
+    };
+
+    match repo {
+        Some(r) => {
+            req.extensions_mut().insert(r.clone());
+            Ok(req)
+        }
+        None => Err((RegistryError::new(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            &format!("Not found, no repo config for host {}", request_host)).into(), req))
+    }
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     env_logger::init_from_env(env_logger::Env::new().default_filter_or("info,rust_registry=trace"));
 
     let registry_config: Registry =
         serde_json::from_reader(File::open("config.json").unwrap()).unwrap();
-    let tls_config = registry_config
-        .tls_config
-        .clone()
-        .map(|cfg| load_rustls_config(&cfg));
-    let http_port = registry_config.port;
-    let https_port = registry_config.tls_config.as_ref().map(|cfg| cfg.port);
 
     let app_data = Data::new(AppState {
-        registry: Arc::new(registry_config),
+        registry: Arc::new(registry_config.clone()),
     });
 
-    let mut server = HttpServer::new(move || {
+    let server = HttpServer::new(move || {
         App::new()
             .wrap(HttpAuthentication::with_fn(user_authorization_check))
             .app_data(Data::clone(&app_data))
@@ -544,17 +574,31 @@ async fn main() -> std::io::Result<()> {
             .service(handle_put_with_digest)
             .service(handle_put_manifest_by_tag)
             .default_service(web::route().to(handle_default))
-    })
-        .bind(format!("[::0]:{}", http_port))?;
+    });
 
-    match &tls_config {
-        Some(cfg) => server = server
-            .bind_rustls(format!("[::0]:{}", https_port.unwrap()), cfg.clone())?,
-        None => {}
-    }
+    let http_binds = registry_config
+        .repositories
+        .iter()
+        .map(|repo| &repo.bind_address)
+        .collect::<Vec<&String>>();
+
+    let https_cfgs = registry_config
+        .repositories
+        .iter()
+        .filter_map(|repo| repo.tls_config.as_ref())
+        .collect::<Vec<&TlsConfig>>();
+
+    let server = http_binds.into_iter().fold(server, |s, x| {
+        s.bind(x).unwrap()
+    });
+    let server = https_cfgs.into_iter().fold(server, |s, cfg| {
+        let tls_config = load_rustls_config(cfg);
+        s.bind_rustls(&cfg.bind_address, tls_config).unwrap()
+    });
 
     server.run().await
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -574,6 +618,11 @@ mod tests {
             .insert_header(ContentType::plaintext())
             .app_data(build_app_data())
             .to_http_request();
+        req.extensions_mut().insert(Repository {
+            storage_path: "/tmp".to_string(),
+            bind_address: "[::]:8080".to_string(),
+            tls_config: None,
+        });
 
         let path = "foo/bar".to_string();
         let upload_path = get_layer_path(&req, &path);
@@ -583,9 +632,11 @@ mod tests {
     fn build_app_data() -> Data<AppState> {
         Data::new(AppState {
             registry: Arc::new(Registry {
-                storage_path: "/tmp".to_string(),
-                port: 8080,
-                tls_config: None,
+                repositories: vec![Repository {
+                    storage_path: "/tmp".to_string(),
+                    bind_address: "[::]:8080".to_string(),
+                    tls_config: None,
+                }],
                 #[cfg(feature = "ldap")]
                 ldap_config: None,
             }),
@@ -611,7 +662,7 @@ mod tests {
         let uuid = Uuid::new_v4();
 
         let path_to_file = PathBuf::from(format!("/tmp/foo/bar/blobs/uploads/{}", uuid));
-        let file_to_move = create_or_replace_file(&path_to_file).unwrap();
+        create_or_replace_file(&path_to_file).unwrap();
 
         let path_to_target_file = PathBuf::from("/tmp/foo/bar/blobs/123");
         fs::remove_file(&path_to_target_file).unwrap_or(());
@@ -621,16 +672,23 @@ mod tests {
             App::new()
                 .app_data(build_app_data())
                 .service(handle_put_with_digest)
-        )
-            .await;
+        ).await;
+
         let req =
             test::TestRequest::put()
                 .uri(format!("/v2/foo/bar/blobs/uploads/{}?digest=123", uuid).as_str())
                 .to_request();
 
+        req.extensions_mut().insert(Repository {
+            storage_path: "/tmp".to_string(),
+            bind_address: "[::]:8080".to_string(),
+            tls_config: None,
+        });
+
         let resp = test::call_service(&app, req).await;
 
         assert!(path_to_target_file.exists());
+        assert!(!path_to_file.exists());
         assert_eq!(resp.status(), StatusCode::CREATED);
         fs::remove_file(&path_to_target_file).unwrap_or(());
     }

@@ -38,8 +38,8 @@ Currently, only the basic functionality is implemented. The following features a
 - [x] Streaming download
 - [ ] add tests, based on https://github.com/ecarrara/oci-registry-client
 - [x] add synchronisation for concurrent uploads
+- [x] add support for multiple registries in one instance
 - [ ] add virtual host support
-- [ ] add support for multiple registries in one instance
 - [ ] add proxying request to other registries
 - [ ] add support grouping registries in namespaces, e.g. first query the "dev" registry, then the "prod" registry
   before ghcr.io is queried.
