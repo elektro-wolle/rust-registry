@@ -1,15 +1,31 @@
 {
-  "repositories": [
-    {
-      "storage_path": "target/",
+  "repositories": {
+    "repo1": {
+      "storage_path": "target/repo",
       "tls_config": {
         "cert": "certs/pong.pem",
         "key": "certs/pong.key",
-        "port": 8443
+        "bind_address": "[::]:8443"
       },
-      "port": 8080
+      "bind_address": "[::]:8080"
     }
-  ],
+  },
+  "proxies": {
+    "proxy1": {
+      "storage_path": "target/proxy",
+      "bind_address": "[::]:8081",
+      "remote_url": "http://localhost:8080"
+    }
+  },
+  "groups": {
+    "group1": {
+      "bind_address": "[::]:8082",
+      "repositories": [
+        "proxy",
+        "repo1"
+      ]
+    }
+  },
   "ldap_config": {
     "ldap_url": "ldap://127.0.0.1:11389",
     "bind_dn": "cn=admin,dc=example,dc=com",

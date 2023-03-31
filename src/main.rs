@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::BufReader;
 use std::io::prelude::*;
@@ -32,6 +33,15 @@ use crate::ldap::*;
 mod ldap;
 mod error;
 
+trait SocketSpecification: StorageSpecification {
+    fn get_bind_address(&self) -> String;
+    fn get_tls_config(&self) -> Option<TlsConfig>;
+}
+
+trait StorageSpecification {
+    fn get_storage_path(&self) -> String;
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct Repository {
     storage_path: String,
@@ -40,11 +50,57 @@ struct Repository {
     tls_config: Option<TlsConfig>,
 }
 
+impl StorageSpecification for Repository {
+    fn get_storage_path(&self) -> String {
+        self.storage_path.clone()
+    }
+}
+
+impl SocketSpecification for Repository {
+    fn get_bind_address(&self) -> String {
+        self.bind_address.clone()
+    }
+    fn get_tls_config(&self) -> Option<TlsConfig> {
+        self.tls_config.clone()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct Proxy {
+    storage_path: String,
+    #[serde(default = "default_http_port")]
+    bind_address: String,
+    tls_config: Option<TlsConfig>,
+    remote_url: String,
+}
+
+impl SocketSpecification for Proxy {
+    fn get_bind_address(&self) -> String {
+        self.bind_address.clone()
+    }
+    fn get_tls_config(&self) -> Option<TlsConfig> {
+        self.tls_config.clone()
+    }
+}
+
+impl StorageSpecification for Proxy {
+    fn get_storage_path(&self) -> String {
+        self.storage_path.clone()
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct Registry {
-    repositories: Vec<Repository>,
+    repositories: HashMap<String, Repository>,
+    proxies: HashMap<String, Proxy>,
     #[cfg(feature = "ldap")]
     ldap_config: Option<LdapConfig>,
+}
+
+struct NamedRepository {
+    name: String,
+    repository: Option<Repository>,
+    proxy: Option<Proxy>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -81,10 +137,18 @@ struct UploadedFile {
 
 fn get_layer_path(_req: &HttpRequest, path: &String) -> PathBuf {
     let extensions = _req.extensions();
-    let repo: &Repository = extensions.get().unwrap();
+    let repo: &NamedRepository = extensions.get().unwrap();
     // clean() will remove any "." and ".." from the path
     let sub_path = PathBuf::from(format!("/{}", path)).clean();
-    let target_path = format!("{}/{}", repo.storage_path, sub_path.display());
+
+    let target_path =
+        if let Some(repository) = &repo.repository {
+            format!("{}/{}", repository.get_storage_path(), sub_path.display())
+        } else if let Some(proxy) = &repo.proxy {
+            format!("{}/{}", proxy.get_storage_path(), sub_path.display())
+        } else {
+            panic!("Neither repository nor proxy is set for this request")
+        };
     // second clean() to ensure that the path is clean
     PathBuf::from(target_path).clean()
 }
@@ -139,7 +203,6 @@ fn lookup_manifest_file(req: HttpRequest, info: &ImageNameWithTag) -> Result<Fil
 async fn handle_get_v2(req: HttpRequest) -> Result<HttpResponse, Error> {
     let ext = req.extensions();
     let o = ext.get::<UserRoles>();
-    info!("o: {:?}", o);
     match o {
         Some(user_with_roles) => {
             info!("userWithRoles: {:?}", user_with_roles);
@@ -520,27 +583,55 @@ pub async fn user_authorization_check(
 fn insert_resolved_repo(req: ServiceRequest) -> Result<ServiceRequest, (Error, ServiceRequest)> {
     let request_host = req.app_config().host();
     let is_tls = req.app_config().secure();
-    let reg = req.app_data::<Data<AppState>>().unwrap();
+    let reg = req.app_data::<Data<AppState>>().unwrap().as_ref();
     let app_config = reg.registry.as_ref();
 
     let repo = if is_tls {
         app_config.repositories.iter().find(|&r| {
-            let tls_cfg = r.tls_config.as_ref().unwrap();
+            let tls_cfg = r.1.tls_config.as_ref().unwrap();
             tls_cfg.bind_address == request_host
         })
     } else {
-        app_config.repositories.iter().find(|&r| r.bind_address == request_host)
+        app_config.repositories.iter().find(|&r| r.1.bind_address == request_host)
     };
 
-    match repo {
+    let proxy = if is_tls {
+        app_config.proxies.iter().find(|&r| {
+            let tls_cfg = r.1.tls_config.as_ref().unwrap();
+            tls_cfg.bind_address == request_host
+        })
+    } else {
+        app_config.proxies.iter().find(|&r| r.1.bind_address == request_host)
+    };
+
+    let named_repo = match (repo, proxy) {
+        (Some(r), _) => {
+            Some(NamedRepository {
+                name: r.0.clone(),
+                repository: Some(r.1.clone()),
+                proxy: None,
+            })
+        }
+        (_, Some(p)) => {
+            Some(NamedRepository {
+                name: p.0.clone(),
+                repository: None,
+                proxy: Some(p.1.clone()),
+            })
+        }
+        _ => None
+    };
+
+    match named_repo {
         Some(r) => {
-            req.extensions_mut().insert(r.clone());
+            trace!("insert_resolved_repo: request_host: {}, is_tls: {}, repo: {:?}", request_host, is_tls, repo);
+            req.extensions_mut().insert(r);
             Ok(req)
         }
         None => Err((RegistryError::new(
             StatusCode::NOT_FOUND,
             "NOT_FOUND",
-            &format!("Not found, no repo config for host {}", request_host)).into(), req))
+            &format!("Not found, no repo config for host {}", request_host)).into(), req)),
     }
 }
 
@@ -579,20 +670,22 @@ async fn main() -> std::io::Result<()> {
     let http_binds = registry_config
         .repositories
         .iter()
-        .map(|repo| &repo.bind_address)
+        .map(|repo| &repo.1.bind_address)
         .collect::<Vec<&String>>();
 
     let https_cfgs = registry_config
         .repositories
         .iter()
-        .filter_map(|repo| repo.tls_config.as_ref())
+        .filter_map(|repo| repo.1.tls_config.as_ref())
         .collect::<Vec<&TlsConfig>>();
 
     let server = http_binds.into_iter().fold(server, |s, x| {
+        trace!("binding http: {}", x);
         s.bind(x).unwrap()
     });
     let server = https_cfgs.into_iter().fold(server, |s, cfg| {
         let tls_config = load_rustls_config(cfg);
+        trace!("binding http: {}", &cfg.bind_address);
         s.bind_rustls(&cfg.bind_address, tls_config).unwrap()
     });
 
@@ -618,10 +711,16 @@ mod tests {
             .insert_header(ContentType::plaintext())
             .app_data(build_app_data())
             .to_http_request();
-        req.extensions_mut().insert(Repository {
+
+        let repo = Repository {
             storage_path: "/tmp".to_string(),
             bind_address: "[::]:8080".to_string(),
             tls_config: None,
+        };
+        req.extensions_mut().insert(NamedRepository {
+            name: "repo1".to_string(),
+            repository: Some(repo),
+            proxy: None,
         });
 
         let path = "foo/bar".to_string();
@@ -632,11 +731,12 @@ mod tests {
     fn build_app_data() -> Data<AppState> {
         Data::new(AppState {
             registry: Arc::new(Registry {
-                repositories: vec![Repository {
+                repositories: HashMap::from([("repo1".to_string(), Repository {
                     storage_path: "/tmp".to_string(),
                     bind_address: "[::]:8080".to_string(),
                     tls_config: None,
-                }],
+                })]),
+                proxies: HashMap::new(),
                 #[cfg(feature = "ldap")]
                 ldap_config: None,
             }),
@@ -679,10 +779,14 @@ mod tests {
                 .uri(format!("/v2/foo/bar/blobs/uploads/{}?digest=123", uuid).as_str())
                 .to_request();
 
-        req.extensions_mut().insert(Repository {
-            storage_path: "/tmp".to_string(),
-            bind_address: "[::]:8080".to_string(),
-            tls_config: None,
+        req.extensions_mut().insert(NamedRepository {
+            name: "repo1".to_string(),
+            repository: Some(Repository {
+                storage_path: "/tmp".to_string(),
+                bind_address: "[::]:8080".to_string(),
+                tls_config: None,
+            }),
+            proxy: None,
         });
 
         let resp = test::call_service(&app, req).await;
