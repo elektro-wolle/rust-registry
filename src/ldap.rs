@@ -158,21 +158,29 @@ pub async fn authenticate_and_get_groups(
 
 #[cfg(test)]
 mod tests {
+    use testcontainers::images::generic::GenericImage;
+
     use crate::ldap::{authenticate_and_get_groups, LdapConfig};
 
     use super::*;
 
-    #[cfg(test)]
-    #[ctor::ctor]
-    fn init() {
-        let _ = env_logger::try_init();
-    }
-
     #[actix_web::test]
     #[cfg(feature = "ldap")]
     async fn test_ldap() {
+        let docker = testcontainers::clients::Cli::default();
+        let container = docker.run(GenericImage::new("bitnami/openldap", "latest")
+            .with_env_var("LDAP_ORGANISATION", "My Company")
+            .with_env_var("LDAP_ROOT", "dc=example,dc=com")
+            .with_env_var("LDAP_DOMAIN", "example.com")
+            .with_env_var("LDAP_ADMIN_USERNAME", "admin")
+            .with_env_var("LDAP_ADMIN_PASSWORD", "adminpassword")
+            .with_wait_for(testcontainers::core::WaitFor::message_on_stderr("slapd starting"))
+        );
+
+        let port = container.get_host_port_ipv4(1389);
+
         let cfg = LdapConfig {
-            ldap_url: "ldap://localhost:11389".to_string(),
+            ldap_url: format!("ldap://127.0.0.1:{}", port),
             bind_dn: "cn=admin,dc=example,dc=com".to_string(),
             bind_password: "adminpassword".to_string(),
             base_dn: "dc=example,dc=com".to_string(),
@@ -186,5 +194,7 @@ mod tests {
         let groups = authenticate_and_get_groups(&cfg, "user02", "bitnami2").await.unwrap();
         assert_eq!(groups, vec!["readers"]);
         info!("Groups: {:?}", groups);
+
+        container.stop();
     }
 }

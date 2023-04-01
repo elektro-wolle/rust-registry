@@ -39,10 +39,11 @@ Currently, only the basic functionality is implemented. The following features a
 - [ ] add tests, based on https://github.com/ecarrara/oci-registry-client
 - [x] add synchronisation for concurrent uploads
 - [x] add support for multiple registries in one instance
-- [ ] add virtual host support
+- [x] add test-container for testing against ldap
 - [ ] add proxying request to other registries
 - [ ] add support grouping registries in namespaces, e.g. first query the "dev" registry, then the "prod" registry
   before ghcr.io is queried.
+- [ ] add rights management for namespaces
 - [ ] add docker-compose file for easy setup of database
 - [ ] add database backend for reference counting and garbage collection
 - [ ] add search within database
@@ -50,15 +51,19 @@ Currently, only the basic functionality is implemented. The following features a
 - [ ] add /v2/_catalog listing via DB
 - [ ] add /v2/<name>/tags/list
 - [ ] config file for auth and storage backends
-- [ ] add DELETE Endpoints
 - [ ] make trait for storage backend
-- [ ] implement storage backend for local fs
+- [x] implement storage backend for local fs
 - [ ] implement storage backend for s3
 - [x] add tls support
 - [ ] semver parsing for tags, keeping the latest x-major, y-minor, z-patch versions
 - [ ] cleanup-jobs for removing old images/manifests
+
+# Maybe
+
+- [ ] add DELETE Endpoints
 - [ ] make trait for auth backend
 - [ ] add `docker login` token support
+- [ ] add virtual host support
 
 # License
 
