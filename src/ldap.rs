@@ -3,9 +3,7 @@ use ldap3::{Ldap, LdapConnAsync, Scope, SearchEntry};
 #[cfg(feature = "ldap")]
 use ldap3::result::Result;
 use log::{info, trace, warn};
-#[cfg(feature = "ldap")]
 use log::debug;
-#[cfg(feature = "ldap")]
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

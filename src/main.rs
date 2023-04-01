@@ -20,6 +20,7 @@ use tokio::sync::Mutex;
 use uuid::*;
 
 use crate::api_objects::*;
+#[cfg(feature = "ldap")]
 use crate::authentication::*;
 use crate::configuration::*;
 use crate::error::*;
@@ -80,6 +81,7 @@ mod configuration {
     use rustls_pemfile::{certs, rsa_private_keys};
     use serde::Deserialize;
 
+    #[cfg(feature = "ldap")]
     use crate::ldap::LdapConfig;
 
     pub trait SocketSpecification: StorageSpecification {
@@ -167,6 +169,12 @@ mod configuration {
         pub bind_address: String,
     }
 
+    #[derive(Debug, Clone, Deserialize)]
+    pub struct UserRoles {
+        pub username: String,
+        pub roles: Vec<String>,
+    }
+
     fn default_http_port() -> String {
         "[::]:8080".to_string()
     }
@@ -209,22 +217,15 @@ mod configuration {
     }
 }
 
+#[cfg(feature = "ldap")]
 mod authentication {
     use actix_web::http::StatusCode;
     use base64::{alphabet, engine, Engine};
     use base64::engine::general_purpose;
-    use serde::Deserialize;
 
-    use crate::configuration::Registry;
+    use crate::configuration::{Registry, UserRoles};
     use crate::error::RegistryError;
     use crate::ldap::authenticate_and_get_groups;
-
-    #[derive(Debug, Clone, Deserialize)]
-    #[allow(dead_code)]
-    pub struct UserRoles {
-        pub username: String,
-        pub roles: Vec<String>,
-    }
 
     pub async fn get_roles_for_authentication(basic_auth: Option<String>, reg_arc: &Registry) -> Result<UserRoles, RegistryError> {
         let auth = basic_auth.ok_or_else(|| RegistryError::new(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", &"Unauthorized, no basic auth".to_string()))?;
@@ -574,29 +575,37 @@ pub async fn user_authorization_check(
 ) -> Result<ServiceRequest, (Error, ServiceRequest)> {
     let req = insert_resolved_repo(req)?;
 
-    let basic_auth: Option<String> = req
-        .headers()
-        .get("authorization")
-        .and_then(|h| h.to_str().ok())
-        .and_then(|auth| auth.strip_prefix("Basic "))
-        .map(|s| s.to_string());
+    #[cfg(feature = "ldap")]
+    {
+        let basic_auth: Option<String> = req
+            .headers()
+            .get("authorization")
+            .and_then(|h| h.to_str().ok())
+            .and_then(|auth| auth.strip_prefix("Basic "))
+            .map(|s| s.to_string());
 
-    let bearer_auth = credentials.map(|c| c.token().to_string());
-    trace!(
-        "user_authorization_check: basic: {:?}, bearer: {:?}",
-        basic_auth, bearer_auth
-    );
+        let bearer_auth = credentials.map(|c| c.token().to_string());
 
-    let app_config = req.app_data::<Data<AppState>>();
-    let reg_arc = app_config.unwrap().registry.as_ref();
+        let app_config = req.app_data::<Data<AppState>>();
+        let reg_arc = app_config.unwrap().registry.as_ref();
 
-    match get_roles_for_authentication(basic_auth, reg_arc).await {
-        Ok(user) => {
-            req.extensions_mut().insert(user);
-            Ok(req)
+        match get_roles_for_authentication(basic_auth, reg_arc).await {
+            Ok(user) => {
+                req.extensions_mut().insert(user);
+                Ok(req)
+            }
+            Err(e) =>
+                Err((e.into(), req)),
         }
-        Err(e) =>
-            Err((e.into(), req)),
+    }
+    #[cfg(not(feature = "ldap"))]
+    {
+        let anon_user = UserRoles {
+            username: "anonymous".to_string(),
+            roles: vec!["*".to_string()],
+        };
+        req.extensions_mut().insert(anon_user);
+        Ok(req)
     }
 }
 
