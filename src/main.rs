@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use actix_web::{App, Error, get, head, http::header, HttpMessage, HttpRequest, HttpResponse, HttpResponseBuilder, HttpServer, middleware, patch, post, put, Result, web};
 use actix_web::dev::ServiceRequest;
-use actix_web::error::ErrorBadRequest;
+use actix_web::error::{ErrorBadRequest, ErrorForbidden};
 use actix_web::http::header::CONTENT_LENGTH;
 use actix_web::http::StatusCode;
 use actix_web::web::{Data, Json, Payload};
@@ -339,13 +339,12 @@ fn lookup_manifest_file(req: HttpRequest, info: &ImageNameWithTag) -> Result<Fil
     Ok(file)
 }
 
+
 #[get("/v2/")]
 async fn handle_get_v2(req: HttpRequest) -> Result<HttpResponse, Error> {
     let ext = req.extensions();
-    let o = ext.get::<UserRoles>();
-    if let Some(user_with_roles) = o {
-        info!("userWithRoles: {:?}", user_with_roles);
-    }
+    let user_with_roles = ext.get::<UserRoles>().ok_or(ErrorBadRequest("no user roles"))?;
+    info!("userWithRoles: {:?}", user_with_roles);
 
     Ok(HttpResponseBuilder::new(StatusCode::OK)
         .insert_header(("Docker-Distribution-API-Version", "registry/2.0"))
@@ -375,6 +374,28 @@ async fn handle_v2_catalog(req: HttpRequest) -> Result<Json<RepositoryInfo>, Err
     Ok(Json(RepositoryInfo { repositories }))
 }
 
+fn ensure_write_access(req: &HttpRequest, repo_name: &str) -> Result<(), RegistryError> {
+    let ext = req.extensions();
+    let user_with_roles = ext.get::<UserRoles>().ok_or(ErrorBadRequest("no user roles"))?;
+    info!("userWithRoles: {:?}", user_with_roles);
+
+    let repo = ext.get::<NamedRepository>().unwrap();
+    info!("repo: {:?}", repo.name);
+
+    Ok(())
+}
+
+fn ensure_read_access(req: &HttpRequest, repo_name: &str) -> Result<(), RegistryError> {
+    let ext = req.extensions();
+    let user_with_roles = ext.get::<UserRoles>().ok_or(ErrorBadRequest("no user roles"))?;
+    info!("userWithRoles: {:?}", user_with_roles);
+
+    let repo = ext.get::<NamedRepository>().unwrap();
+    info!("repo: {:?}", repo.name);
+
+    Ok(())
+}
+
 #[post("/v2/{repo_name:.*}/blobs/uploads/")]
 async fn handle_post(req: HttpRequest) -> Result<HttpResponse, RegistryError> {
     let repo_name = req
@@ -382,6 +403,8 @@ async fn handle_post(req: HttpRequest) -> Result<HttpResponse, RegistryError> {
         .get("repo_name")
         .ok_or(ErrorBadRequest("repo_name not present"))?;
     let uuid = Uuid::new_v4();
+
+    ensure_write_access(&req, &repo_name)?;
 
     Ok(HttpResponseBuilder::new(StatusCode::ACCEPTED)
         .insert_header((
@@ -397,6 +420,8 @@ async fn handle_patch(
     req: HttpRequest,
     mut payload: Payload,
 ) -> Result<HttpResponse, RegistryError> {
+    ensure_write_access(&req, &info.repo_name)?;
+
     let upload_path = get_layer_path(&req, &format!("{}/blobs/uploads/{}", info.repo_name, info.uuid));
     let uploaded_file = write_payload_to_file(&mut payload, &upload_path).await?;
 
@@ -412,6 +437,8 @@ async fn handle_get_manifest_by_tag(
     req: HttpRequest,
     info: web::Path<ImageNameWithTag>,
 ) -> Result<HttpResponse, RegistryError> {
+    ensure_read_access(&req, &info.repo_name)?;
+
     let mut file = lookup_manifest_file(req, &info)?;
 
     // read file as string
@@ -436,6 +463,8 @@ async fn handle_head_manifest_by_tag(
     req: HttpRequest,
     info: web::Path<ImageNameWithTag>,
 ) -> Result<HttpResponse, RegistryError> {
+    ensure_read_access(&req, &info.repo_name)?;
+
     let file = lookup_manifest_file(req, &info)?;
     let metadata = file.metadata()?;
     if metadata.len() == 0 || metadata.is_dir() {
@@ -455,6 +484,8 @@ async fn handle_get_layer_by_hash(
     req: HttpRequest,
     info: web::Path<ImageNameWithDigest>,
 ) -> Result<HttpResponse, RegistryError> {
+    ensure_read_access(&req, &info.repo_name)?;
+
     let layer_path = get_layer_path(&req, &format!("{}/{}", info.repo_name, info.digest));
     let file = actix_files::NamedFile::open_async(&layer_path)
         .await
@@ -476,6 +507,8 @@ async fn handle_head_layer_by_hash(
     req: HttpRequest,
     info: web::Path<ImageNameWithDigest>,
 ) -> Result<HttpResponse, RegistryError> {
+    ensure_read_access(&req, &info.repo_name)?;
+
     let layer_path = get_layer_path(&req, &format!("{}/blobs/{}", info.repo_name, info.digest));
     trace!("head: layer_path: {}", layer_path.display());
 
@@ -504,6 +537,8 @@ async fn handle_put_with_digest(
     info: web::Path<ImageNameWithUUID>,
     req: HttpRequest,
 ) -> Result<HttpResponse, RegistryError> {
+    ensure_write_access(&req, &info.repo_name)?;
+
     let layer_path = format!("{}/blobs/{}", info.repo_name, digest_param.digest);
     let upload_path = get_layer_path(&req, &format!("{}/blobs/uploads/{}", info.repo_name, info.uuid));
     let path_to_file = get_layer_path(&req, &layer_path);
@@ -523,6 +558,8 @@ async fn handle_put_manifest_by_tag(
     info: web::Path<ImageNameWithTag>,
     mut payload: Payload,
 ) -> Result<HttpResponse, RegistryError> {
+    ensure_write_access(&req, &info.repo_name)?;
+
     lazy_static! {
         static ref LOCK_MUTEX:Mutex<u16> = Mutex::new(0);
     }
@@ -555,7 +592,7 @@ async fn handle_default(req: HttpRequest) -> HttpResponse {
     info!("default: {:#?}", req);
     let errors = AppErrors {
         errors: vec![AppError {
-            code: "UNSUPPORTED".to_string(),
+            code: "NOT_FOUND".to_string(),
             message: "Unsupported operation".to_string(),
             detail: None,
         }],
