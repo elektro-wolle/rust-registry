@@ -156,3 +156,37 @@ pub async fn authenticate_and_get_groups(
         }
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use crate::ldap::{authenticate_and_get_groups, LdapConfig};
+
+    use super::*;
+
+    #[cfg(test)]
+    #[ctor::ctor]
+    fn init() {
+        let _ = env_logger::try_init();
+    }
+
+    #[actix_web::test]
+    #[cfg(feature = "ldap")]
+    async fn test_ldap() {
+        let cfg = LdapConfig {
+            ldap_url: "ldap://localhost:11389".to_string(),
+            bind_dn: "cn=admin,dc=example,dc=com".to_string(),
+            bind_password: "adminpassword".to_string(),
+            base_dn: "dc=example,dc=com".to_string(),
+            group_search_filter: "(&(objectClass=groupOfNames)(member={}))".to_string(),
+            group_attribute: "cn".to_string(),
+            user_search_filter: "(&(objectClass=inetOrgPerson)(uid={}))".to_string(),
+            group_search_base_dn: Some("dc=example,dc=com".to_string()),
+            user_search_base_dn: Some("dc=example,dc=com".to_string()),
+        };
+
+        let groups = authenticate_and_get_groups(&cfg, "user02", "bitnami2").await.unwrap();
+        assert_eq!(groups, vec!["readers"]);
+        info!("Groups: {:?}", groups);
+    }
+}

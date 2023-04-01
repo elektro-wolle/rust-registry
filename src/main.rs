@@ -1,6 +1,4 @@
-use std::collections::HashMap;
 use std::fs::{self, DirBuilder, File, OpenOptions};
-use std::io::BufReader;
 use std::io::prelude::*;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,126 +11,274 @@ use actix_web::http::StatusCode;
 use actix_web::web::{Data, Json, Payload};
 use actix_web_httpauth::extractors::bearer::BearerAuth;
 use actix_web_httpauth::middleware::HttpAuthentication;
-use base64::{alphabet, engine, Engine};
-use base64::engine::general_purpose;
 use futures_util::StreamExt;
 use lazy_static::lazy_static;
 use log::{debug, info, trace};
 use path_clean::PathClean;
 use ring::digest::{Context, SHA256};
-use rustls::{Certificate, PrivateKey, ServerConfig};
-use rustls_pemfile::{certs, rsa_private_keys};
-use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use uuid::*;
 
+use crate::api_objects::*;
+use crate::authentication::*;
+use crate::configuration::*;
 use crate::error::*;
-#[cfg(feature = "ldap")]
-use crate::ldap::*;
 
+#[cfg(feature = "ldap")]
 mod ldap;
 mod error;
 
-trait SocketSpecification: StorageSpecification {
-    fn get_bind_address(&self) -> String;
-    fn get_tls_config(&self) -> Option<TlsConfig>;
-}
+mod api_objects {
+    use serde::{Deserialize, Serialize};
 
-trait StorageSpecification {
-    fn get_storage_path(&self) -> String;
-}
+    #[derive(Deserialize, Serialize)]
+    pub struct ImageNameWithDigest {
+        pub repo_name: String,
+        pub digest: String,
+    }
 
-#[derive(Debug, Clone, Deserialize)]
-struct Repository {
-    storage_path: String,
-    #[serde(default = "default_http_port")]
-    bind_address: String,
-    tls_config: Option<TlsConfig>,
-}
+    pub struct UploadedFile {
+        pub sha256: String,
+        pub size: u64,
+    }
 
-impl StorageSpecification for Repository {
-    fn get_storage_path(&self) -> String {
-        self.storage_path.clone()
+    #[derive(Serialize)]
+    pub struct RepositoryInfo {
+        pub repositories: Vec<String>,
+    }
+
+    #[derive(Deserialize)]
+    pub struct ImageNameWithUUID {
+        pub repo_name: String,
+        pub uuid: String,
+    }
+
+    #[derive(Deserialize)]
+    pub struct ImageNameWithTag {
+        pub repo_name: String,
+        pub tag: String,
+    }
+
+    #[derive(serde::Deserialize)]
+    pub struct DigestParam {
+        pub digest: String,
+    }
+
+    #[derive(Serialize)]
+    pub struct VersionInfo {
+        pub versions: Vec<String>,
     }
 }
 
-impl SocketSpecification for Repository {
-    fn get_bind_address(&self) -> String {
-        self.bind_address.clone()
+mod configuration {
+    use std::collections::HashMap;
+    use std::fs::File;
+    use std::io::BufReader;
+
+    use async_trait::async_trait;
+    use rustls::{Certificate, PrivateKey, ServerConfig};
+    use rustls_pemfile::{certs, rsa_private_keys};
+    use serde::Deserialize;
+
+    use crate::ldap::LdapConfig;
+
+    pub trait SocketSpecification: StorageSpecification {
+        fn get_bind_address(&self) -> String;
+        fn get_tls_config(&self) -> Option<TlsConfig>;
     }
-    fn get_tls_config(&self) -> Option<TlsConfig> {
-        self.tls_config.clone()
+
+    #[async_trait]
+    pub trait StorageSpecification {
+        fn get_storage_path(&self) -> String;
+        // async fn load_manifest_by_tag(&self, image: &ImageNameWithTag);
+        // async fn load_manifest_by_digest(&self, image: &ImageNameWithDigest);
+        // async fn load_blob_by_digest(&self, image: &ImageNameWithDigest);
+        // async fn load_blob_by_tag(&self, image: &ImageNameWithTag);
+    }
+
+    #[derive(Debug, Clone, Deserialize)]
+    pub struct Repository {
+        pub storage_path: String,
+        #[serde(default = "default_http_port")]
+        pub bind_address: String,
+        pub tls_config: Option<TlsConfig>,
+    }
+
+    impl StorageSpecification for Repository {
+        fn get_storage_path(&self) -> String {
+            self.storage_path.clone()
+        }
+    }
+
+    impl SocketSpecification for Repository {
+        fn get_bind_address(&self) -> String {
+            self.bind_address.clone()
+        }
+        fn get_tls_config(&self) -> Option<TlsConfig> {
+            self.tls_config.clone()
+        }
+    }
+
+    #[derive(Debug, Clone, Deserialize)]
+    pub struct Proxy {
+        pub storage_path: String,
+        #[serde(default = "default_http_port")]
+        pub bind_address: String,
+        pub tls_config: Option<TlsConfig>,
+        pub remote_url: String,
+    }
+
+
+    #[derive(Debug, Clone, Deserialize)]
+    pub struct Registry {
+        pub repositories: HashMap<String, Repository>,
+        pub proxies: HashMap<String, Proxy>,
+        #[cfg(feature = "ldap")]
+        pub ldap_config: Option<LdapConfig>,
+    }
+
+    pub struct NamedRepository {
+        pub name: String,
+        pub repository: Option<Repository>,
+        pub proxy: Option<Proxy>,
+    }
+
+    impl StorageSpecification for NamedRepository {
+        fn get_storage_path(&self) -> String {
+            if let Some(proxy) = &self.proxy {
+                proxy.storage_path.clone()
+            } else if let Some(repo) = &self.repository {
+                repo.storage_path.clone()
+            } else {
+                panic!("Neither repository nor proxy is set for this request")
+            }
+        }
+    }
+
+    pub trait TlsServerConfiguration {
+        fn load_rustls_config(self: &Self) -> ServerConfig;
+    }
+
+    #[derive(Debug, Clone, Deserialize)]
+    pub struct TlsConfig {
+        pub cert: String,
+        pub key: String,
+        #[serde(default = "default_https_port")]
+        pub bind_address: String,
+    }
+
+    fn default_http_port() -> String {
+        "[::]:8080".to_string()
+    }
+
+    fn default_https_port() -> String {
+        "[::]:8443".to_string()
+    }
+
+    impl TlsServerConfiguration for TlsConfig {
+        fn load_rustls_config(self: &TlsConfig) -> ServerConfig {
+            // init server config builder with safe defaults
+            let config = ServerConfig::builder()
+                .with_safe_defaults()
+                .with_no_client_auth();
+
+            // load TLS key/cert files
+            let cert_file = &mut BufReader::new(File::open(&self.cert).unwrap());
+            let key_file = &mut BufReader::new(File::open(&self.key).unwrap());
+
+            // convert files to key/cert objects
+            let cert_chain = certs(cert_file)
+                .unwrap()
+                .into_iter()
+                .map(Certificate)
+                .collect();
+            let mut keys: Vec<PrivateKey> = rsa_private_keys(key_file)
+                .unwrap()
+                .into_iter()
+                .map(PrivateKey)
+                .collect();
+
+            // exit if no keys could be parsed
+            if keys.is_empty() {
+                eprintln!("Could not locate PKCS 8 private keys.");
+                std::process::exit(1);
+            }
+
+            config.with_single_cert(cert_chain, keys.remove(0)).unwrap()
+        }
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-struct Proxy {
-    storage_path: String,
-    #[serde(default = "default_http_port")]
-    bind_address: String,
-    tls_config: Option<TlsConfig>,
-    remote_url: String,
-}
+mod authentication {
+    use actix_web::http::StatusCode;
+    use base64::{alphabet, engine, Engine};
+    use base64::engine::general_purpose;
+    use serde::Deserialize;
 
-impl SocketSpecification for Proxy {
-    fn get_bind_address(&self) -> String {
-        self.bind_address.clone()
+    use crate::configuration::Registry;
+    use crate::error::RegistryError;
+    use crate::ldap::authenticate_and_get_groups;
+
+    #[derive(Debug, Clone, Deserialize)]
+    #[allow(dead_code)]
+    pub struct UserRoles {
+        pub username: String,
+        pub roles: Vec<String>,
     }
-    fn get_tls_config(&self) -> Option<TlsConfig> {
-        self.tls_config.clone()
+
+    pub async fn get_roles_for_authentication(basic_auth: Option<String>, reg_arc: &Registry) -> Result<UserRoles, RegistryError> {
+        let auth = basic_auth.ok_or_else(|| RegistryError::new(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", &"Unauthorized, no basic auth".to_string()))?;
+        let engine = engine::GeneralPurpose::new(&alphabet::URL_SAFE, general_purpose::PAD);
+        let decoded = engine
+            .decode(auth.as_bytes())
+            .map_err(|_| RegistryError::new(StatusCode::FORBIDDEN, "FORBIDDEN", &"Unauthorized, invalid base64".to_string()))?;
+
+        let decoded_str = String::from_utf8(decoded)
+            .map_err(|_| RegistryError::new(StatusCode::FORBIDDEN, "FORBIDDEN", &"Unauthorized, invalid utf8".to_string()))?;
+
+        let parts: Vec<&str> = decoded_str.split(':').collect();
+
+        if parts.len() != 2 {
+            return Err(RegistryError::new(StatusCode::FORBIDDEN, "FORBIDDEN", &"Unauthorized, wrong format".to_string()));
+        }
+
+        let username = parts[0].to_string();
+        let password = parts[1].to_string();
+
+        let ldap = reg_arc.ldap_config.as_ref();
+
+        match ldap {
+            Some(ldap) => {
+                let roles = authenticate_and_get_groups(
+                    ldap,
+                    &username,
+                    &password).await
+                    .map_err(|e| {
+                        RegistryError::new(
+                            StatusCode::FORBIDDEN,
+                            "FORBIDDEN",
+                            &format!("Unauthorized, ldap error: {}", e),
+                        )
+                    })?;
+                if roles.is_empty() {
+                    Err(RegistryError::new(
+                        StatusCode::FORBIDDEN,
+                        "FORBIDDEN",
+                        &"Unauthorized, no ldap groups".to_string()))
+                } else {
+                    Ok(UserRoles { username, roles })
+                }
+            }
+            _ => Err(RegistryError::new(
+                StatusCode::FORBIDDEN,
+                "FORBIDDEN",
+                &"Unauthorized, no ldap config".to_string()))
+        }
     }
 }
 
-impl StorageSpecification for Proxy {
-    fn get_storage_path(&self) -> String {
-        self.storage_path.clone()
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct Registry {
-    repositories: HashMap<String, Repository>,
-    proxies: HashMap<String, Proxy>,
-    #[cfg(feature = "ldap")]
-    ldap_config: Option<LdapConfig>,
-}
-
-struct NamedRepository {
-    name: String,
-    repository: Option<Repository>,
-    proxy: Option<Proxy>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct TlsConfig {
-    cert: String,
-    key: String,
-    #[serde(default = "default_https_port")]
-    bind_address: String,
-}
-
-fn default_http_port() -> String {
-    "[::]:8080".to_string()
-}
-
-fn default_https_port() -> String {
-    "[::]:8443".to_string()
-}
-
-struct AppState {
-    registry: Arc<Registry>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
-struct UserRoles {
-    username: String,
-    roles: Vec<String>,
-}
-
-struct UploadedFile {
-    sha256: String,
-    size: u64,
+pub struct AppState {
+    pub registry: Arc<Registry>,
 }
 
 fn get_layer_path(_req: &HttpRequest, path: &String) -> PathBuf {
@@ -140,15 +286,8 @@ fn get_layer_path(_req: &HttpRequest, path: &String) -> PathBuf {
     let repo: &NamedRepository = extensions.get().unwrap();
     // clean() will remove any "." and ".." from the path
     let sub_path = PathBuf::from(format!("/{}", path)).clean();
+    let target_path = format!("{}/{}", repo.get_storage_path(), sub_path.display());
 
-    let target_path =
-        if let Some(repository) = &repo.repository {
-            format!("{}/{}", repository.get_storage_path(), sub_path.display())
-        } else if let Some(proxy) = &repo.proxy {
-            format!("{}/{}", proxy.get_storage_path(), sub_path.display())
-        } else {
-            panic!("Neither repository nor proxy is set for this request")
-        };
     // second clean() to ensure that the path is clean
     PathBuf::from(target_path).clean()
 }
@@ -257,22 +396,6 @@ async fn handle_post(req: HttpRequest) -> Result<HttpResponse, RegistryError> {
         .finish())
 }
 
-#[derive(Serialize)]
-struct VersionInfo {
-    versions: Vec<String>,
-}
-
-#[derive(Serialize)]
-struct RepositoryInfo {
-    repositories: Vec<String>,
-}
-
-#[derive(Deserialize)]
-struct ImageNameWithUUID {
-    repo_name: String,
-    uuid: String,
-}
-
 #[patch("/v2/{repo_name:.*}/blobs/uploads/{uuid}")]
 async fn handle_patch(
     info: web::Path<ImageNameWithUUID>,
@@ -287,13 +410,6 @@ async fn handle_patch(
         .insert_header(("Docker-Upload-UUID", info.uuid.as_str()))
         .insert_header(("Docker-Content-Digest", format!("sha256:{}", uploaded_file.sha256)))
         .finish())
-}
-
-
-#[derive(Deserialize)]
-struct ImageNameWithTag {
-    repo_name: String,
-    tag: String,
 }
 
 #[get("/v2/{repo_name:.*}/manifests/{tag}")]
@@ -337,12 +453,6 @@ async fn handle_head_manifest_by_tag(
     Ok(HttpResponseBuilder::new(StatusCode::OK)
         .insert_header((CONTENT_LENGTH, metadata.len()))
         .finish())
-}
-
-#[derive(Deserialize, Serialize)]
-struct ImageNameWithDigest {
-    repo_name: String,
-    digest: String,
 }
 
 #[get("/v2/{repo_name:.*}/{digest}")]
@@ -390,11 +500,6 @@ async fn handle_head_layer_by_hash(
         .insert_header((CONTENT_LENGTH, file.metadata().len()))
         .insert_header(("Docker-Content-Digest", info.digest.to_string()))
         .finish())
-}
-
-#[derive(serde::Deserialize)]
-struct DigestParam {
-    digest: String,
 }
 
 
@@ -463,94 +568,6 @@ async fn handle_default(req: HttpRequest) -> HttpResponse {
     HttpResponseBuilder::new(StatusCode::NOT_FOUND).json(errors)
 }
 
-fn load_rustls_config(tls_config: &TlsConfig) -> ServerConfig {
-    // init server config builder with safe defaults
-    let config = ServerConfig::builder()
-        .with_safe_defaults()
-        .with_no_client_auth();
-
-    // load TLS key/cert files
-    let cert_file = &mut BufReader::new(File::open(&tls_config.cert).unwrap());
-    let key_file = &mut BufReader::new(File::open(&tls_config.key).unwrap());
-
-    // convert files to key/cert objects
-    let cert_chain = certs(cert_file)
-        .unwrap()
-        .into_iter()
-        .map(Certificate)
-        .collect();
-    let mut keys: Vec<PrivateKey> = rsa_private_keys(key_file)
-        .unwrap()
-        .into_iter()
-        .map(PrivateKey)
-        .collect();
-
-    // exit if no keys could be parsed
-    if keys.is_empty() {
-        eprintln!("Could not locate PKCS 8 private keys.");
-        std::process::exit(1);
-    }
-
-    config.with_single_cert(cert_chain, keys.remove(0)).unwrap()
-}
-
-async fn _authenticate_user(
-    req: &ServiceRequest,
-    basic_auth: Option<String>,
-    _bearer_auth: Option<String>,
-) -> Result<UserRoles, RegistryError> {
-    let auth = basic_auth.ok_or_else(|| RegistryError::new(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", &"Unauthorized, no basic auth".to_string()))?;
-
-    let engine = engine::GeneralPurpose::new(&alphabet::URL_SAFE, general_purpose::PAD);
-    let decoded = engine
-        .decode(auth.as_bytes())
-        .map_err(|_| RegistryError::new(StatusCode::FORBIDDEN, "FORBIDDEN", &"Unauthorized, invalid base64".to_string()))?;
-
-    let decoded_str = String::from_utf8(decoded)
-        .map_err(|_| RegistryError::new(StatusCode::FORBIDDEN, "FORBIDDEN", &"Unauthorized, invalid utf8".to_string()))?;
-
-    let parts: Vec<&str> = decoded_str.split(':').collect();
-
-    if parts.len() != 2 {
-        return Err(RegistryError::new(StatusCode::FORBIDDEN, "FORBIDDEN", &"Unauthorized, wrong format".to_string()));
-    }
-
-    let username = parts[0].to_string();
-    let password = parts[1].to_string();
-
-    let app_config = req.app_data::<Data<AppState>>();
-    let reg_arc = app_config.unwrap().registry.as_ref();
-    let ldap = reg_arc.ldap_config.as_ref();
-
-    match ldap {
-        Some(ldap) => {
-            let roles = authenticate_and_get_groups(
-                ldap,
-                &username,
-                &password).await
-                .map_err(|e| {
-                    RegistryError::new(
-                        StatusCode::FORBIDDEN,
-                        "FORBIDDEN",
-                        &format!("Unauthorized, ldap error: {}", e),
-                    )
-                })?;
-            if roles.is_empty() {
-                Err(RegistryError::new(
-                    StatusCode::FORBIDDEN,
-                    "FORBIDDEN",
-                    &"Unauthorized, no ldap groups".to_string()))
-            } else {
-                Ok(UserRoles { username, roles })
-            }
-        }
-        _ => Err(RegistryError::new(
-            StatusCode::FORBIDDEN,
-            "FORBIDDEN",
-            &"Unauthorized, no ldap config".to_string()))
-    }
-}
-
 pub async fn user_authorization_check(
     req: ServiceRequest,
     credentials: Option<BearerAuth>,
@@ -570,7 +587,10 @@ pub async fn user_authorization_check(
         basic_auth, bearer_auth
     );
 
-    match _authenticate_user(&req, basic_auth, bearer_auth).await {
+    let app_config = req.app_data::<Data<AppState>>();
+    let reg_arc = app_config.unwrap().registry.as_ref();
+
+    match get_roles_for_authentication(basic_auth, reg_arc).await {
         Ok(user) => {
             req.extensions_mut().insert(user);
             Ok(req)
@@ -684,8 +704,8 @@ async fn main() -> std::io::Result<()> {
         s.bind(x).unwrap()
     });
     let server = https_cfgs.into_iter().fold(server, |s, cfg| {
-        let tls_config = load_rustls_config(cfg);
-        trace!("binding http: {}", &cfg.bind_address);
+        let tls_config = cfg.load_rustls_config();
+        trace!("binding https: {}", &cfg.bind_address);
         s.bind_rustls(&cfg.bind_address, tls_config).unwrap()
     });
 
@@ -695,15 +715,17 @@ async fn main() -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use actix_web::{http::header::ContentType, test};
 
     use super::*;
 
-    #[actix_web::test]
-    async fn init_logger() {
-        env_logger::init_from_env(env_logger::Env::new().default_filter_or("debug,rust_registry=trace"));
+    #[cfg(test)]
+    #[ctor::ctor]
+    fn init() {
+        let _ = env_logger::try_init();
     }
-
 
     #[actix_web::test]
     async fn test_get_upload_path() {
@@ -795,26 +817,5 @@ mod tests {
         assert!(!path_to_file.exists());
         assert_eq!(resp.status(), StatusCode::CREATED);
         fs::remove_file(&path_to_target_file).unwrap_or(());
-    }
-
-
-    #[actix_web::test]
-    #[cfg(feature = "ldap")]
-    async fn test_ldap() {
-        let cfg = LdapConfig {
-            ldap_url: "ldap://localhost:11389".to_string(),
-            bind_dn: "cn=admin,dc=example,dc=com".to_string(),
-            bind_password: "adminpassword".to_string(),
-            base_dn: "dc=example,dc=com".to_string(),
-            group_search_filter: "(&(objectClass=groupOfNames)(member={}))".to_string(),
-            group_attribute: "cn".to_string(),
-            user_search_filter: "(&(objectClass=inetOrgPerson)(uid={}))".to_string(),
-            group_search_base_dn: Some("dc=example,dc=com".to_string()),
-            user_search_base_dn: Some("dc=example,dc=com".to_string()),
-        };
-
-        let groups = authenticate_and_get_groups(&cfg, "user02", "bitnami2").await.unwrap();
-        assert_eq!(groups, vec!["readers"]);
-        info!("Groups: {:?}", groups);
     }
 }
