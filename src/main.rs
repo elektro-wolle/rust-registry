@@ -374,18 +374,24 @@ async fn handle_v2_catalog(req: HttpRequest) -> Result<Json<RepositoryInfo>, Err
     Ok(Json(RepositoryInfo { repositories }))
 }
 
-fn ensure_write_access(req: &HttpRequest, repo_name: &str) -> Result<(), RegistryError> {
+fn ensure_write_access(req: &HttpRequest) -> Result<(), RegistryError> {
     let ext = req.extensions();
-    let user_with_roles = ext.get::<UserRoles>().ok_or(ErrorBadRequest("no user roles"))?;
-    info!("userWithRoles: {:?}", user_with_roles);
-
     let repo = ext.get::<NamedRepository>().unwrap();
     info!("repo: {:?}", repo.name);
+    if repo.repository.is_none() {
+        return Err(RegistryError::new(
+            StatusCode::FORBIDDEN,
+            "FORBIDDEN",
+            &format!("Unauthorized, no writable repo: {}", repo.name)));
+    }
+
+    let user_with_roles = ext.get::<UserRoles>().ok_or(ErrorBadRequest("no user roles"))?;
+    info!("userWithRoles: {:?}", user_with_roles);
 
     Ok(())
 }
 
-fn ensure_read_access(req: &HttpRequest, repo_name: &str) -> Result<(), RegistryError> {
+fn ensure_read_access(req: &HttpRequest) -> Result<(), RegistryError> {
     let ext = req.extensions();
     let user_with_roles = ext.get::<UserRoles>().ok_or(ErrorBadRequest("no user roles"))?;
     info!("userWithRoles: {:?}", user_with_roles);
@@ -404,7 +410,7 @@ async fn handle_post(req: HttpRequest) -> Result<HttpResponse, RegistryError> {
         .ok_or(ErrorBadRequest("repo_name not present"))?;
     let uuid = Uuid::new_v4();
 
-    ensure_write_access(&req, &repo_name)?;
+    ensure_write_access(&req)?;
 
     Ok(HttpResponseBuilder::new(StatusCode::ACCEPTED)
         .insert_header((
@@ -420,7 +426,7 @@ async fn handle_patch(
     req: HttpRequest,
     mut payload: Payload,
 ) -> Result<HttpResponse, RegistryError> {
-    ensure_write_access(&req, &info.repo_name)?;
+    ensure_write_access(&req)?;
 
     let upload_path = get_layer_path(&req, &format!("{}/blobs/uploads/{}", info.repo_name, info.uuid));
     let uploaded_file = write_payload_to_file(&mut payload, &upload_path).await?;
@@ -437,7 +443,7 @@ async fn handle_get_manifest_by_tag(
     req: HttpRequest,
     info: web::Path<ImageNameWithTag>,
 ) -> Result<HttpResponse, RegistryError> {
-    ensure_read_access(&req, &info.repo_name)?;
+    ensure_read_access(&req)?;
 
     let mut file = lookup_manifest_file(req, &info)?;
 
@@ -463,7 +469,7 @@ async fn handle_head_manifest_by_tag(
     req: HttpRequest,
     info: web::Path<ImageNameWithTag>,
 ) -> Result<HttpResponse, RegistryError> {
-    ensure_read_access(&req, &info.repo_name)?;
+    ensure_read_access(&req)?;
 
     let file = lookup_manifest_file(req, &info)?;
     let metadata = file.metadata()?;
@@ -484,7 +490,7 @@ async fn handle_get_layer_by_hash(
     req: HttpRequest,
     info: web::Path<ImageNameWithDigest>,
 ) -> Result<HttpResponse, RegistryError> {
-    ensure_read_access(&req, &info.repo_name)?;
+    ensure_read_access(&req)?;
 
     let layer_path = get_layer_path(&req, &format!("{}/{}", info.repo_name, info.digest));
     let file = actix_files::NamedFile::open_async(&layer_path)
@@ -507,7 +513,7 @@ async fn handle_head_layer_by_hash(
     req: HttpRequest,
     info: web::Path<ImageNameWithDigest>,
 ) -> Result<HttpResponse, RegistryError> {
-    ensure_read_access(&req, &info.repo_name)?;
+    ensure_read_access(&req)?;
 
     let layer_path = get_layer_path(&req, &format!("{}/blobs/{}", info.repo_name, info.digest));
     trace!("head: layer_path: {}", layer_path.display());
@@ -537,7 +543,7 @@ async fn handle_put_with_digest(
     info: web::Path<ImageNameWithUUID>,
     req: HttpRequest,
 ) -> Result<HttpResponse, RegistryError> {
-    ensure_write_access(&req, &info.repo_name)?;
+    ensure_write_access(&req)?;
 
     let layer_path = format!("{}/blobs/{}", info.repo_name, digest_param.digest);
     let upload_path = get_layer_path(&req, &format!("{}/blobs/uploads/{}", info.repo_name, info.uuid));
@@ -558,7 +564,7 @@ async fn handle_put_manifest_by_tag(
     info: web::Path<ImageNameWithTag>,
     mut payload: Payload,
 ) -> Result<HttpResponse, RegistryError> {
-    ensure_write_access(&req, &info.repo_name)?;
+    ensure_write_access(&req)?;
 
     lazy_static! {
         static ref LOCK_MUTEX:Mutex<u16> = Mutex::new(0);
