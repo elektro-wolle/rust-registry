@@ -70,5 +70,3 @@ Currently, only the basic functionality is implemented. The following features a
 Licensed under
 
 * MIT license (LICENSE-MIT or http://opensource.org/licenses/MIT)
-
-at your option.
