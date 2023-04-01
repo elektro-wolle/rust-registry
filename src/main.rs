@@ -8,7 +8,7 @@ use actix_web::dev::ServiceRequest;
 use actix_web::error::ErrorBadRequest;
 use actix_web::http::header::CONTENT_LENGTH;
 use actix_web::http::StatusCode;
-use actix_web::web::{Data, Json, Payload};
+use actix_web::web::{Data, Json, Path, Payload};
 use actix_web_httpauth::extractors::bearer::BearerAuth;
 use actix_web_httpauth::middleware::HttpAuthentication;
 use futures_util::StreamExt;
@@ -22,6 +22,7 @@ use crate::api_objects::*;
 #[cfg(feature = "ldap")]
 use crate::authentication::*;
 use crate::configuration::*;
+use crate::configuration::TargetRegistry::{ReadOnlyProxy, WriteableRepository};
 use crate::error::*;
 
 #[cfg(feature = "ldap")]
@@ -88,6 +89,7 @@ mod configuration {
     use serde::Deserialize;
 
     use crate::api_objects::{ImageNameWithDigest, ImageNameWithTag};
+    use crate::configuration::TargetRegistry::{ReadOnlyProxy, WriteableRepository};
     use crate::error::RegistryError;
     #[cfg(feature = "ldap")]
     use crate::ldap::LdapConfig;
@@ -142,6 +144,11 @@ mod configuration {
         }
     }
 
+    pub enum TargetRegistry {
+        WriteableRepository(Repository),
+        ReadOnlyProxy(Proxy),
+    }
+
     #[derive(Debug, Clone, Deserialize)]
     pub struct Registry {
         pub repositories: HashMap<String, Repository>,
@@ -152,34 +159,29 @@ mod configuration {
 
     pub struct NamedRepository {
         pub name: String,
-        pub repository: Option<Repository>,
-        pub proxy: Option<Proxy>,
+        pub repository: TargetRegistry,
     }
 
-    impl NamedRepository {
-        pub(crate) fn get_readable_repository(&self) -> &dyn ReadableRepository {
-            let is_proxy = self.proxy.is_some();
-            if is_proxy {
-                let proxy = self.proxy.as_ref().unwrap();
-                proxy
-            } else {
-                let repo = self.repository.as_ref().unwrap();
-                repo
-            }
-        }
-    }
-
-    impl ReadableRepository for NamedRepository {
+    impl ReadableRepository for TargetRegistry {
         fn get_layer_path(&self, path: &str) -> Result<PathBuf, RegistryError> {
-            self.get_readable_repository().get_layer_path(path)
+            match self {
+                WriteableRepository(w) => w.get_layer_path(path),
+                ReadOnlyProxy(r) => r.get_layer_path(path),
+            }
         }
 
         fn lookup_manifest_file(&self, info: &ImageNameWithTag) -> Result<PathBuf, RegistryError> {
-            self.get_readable_repository().lookup_manifest_file(info)
+            match self {
+                WriteableRepository(w) => w.lookup_manifest_file(info),
+                ReadOnlyProxy(r) => r.lookup_manifest_file(info),
+            }
         }
 
         fn lookup_blob_file(&self, info: &ImageNameWithDigest) -> Result<PathBuf, RegistryError> {
-            self.get_readable_repository().lookup_blob_file(info)
+            match self {
+                WriteableRepository(w) => w.lookup_blob_file(info),
+                ReadOnlyProxy(r) => r.lookup_blob_file(info),
+            }
         }
     }
 
@@ -391,17 +393,18 @@ fn ensure_write_access(req: &HttpRequest, path: &String) -> Result<(), RegistryE
     let ext = req.extensions();
     let repo = ext.get::<NamedRepository>().unwrap();
     info!("repo: {:?}", repo.name);
-    if repo.repository.is_none() {
-        return Err(RegistryError::new(
+    match repo.repository {
+        WriteableRepository(_) => {
+            let user_with_roles = ext.get::<UserRoles>().ok_or(ErrorBadRequest("no user roles"))?;
+            info!("check write access to repo: {:?} {} for user: {:?}", repo.name, path, user_with_roles);
+
+            Ok(())
+        }
+        _ => Err(RegistryError::new(
             StatusCode::FORBIDDEN,
             "FORBIDDEN",
-            &format!("Unauthorized, no writable repo: {}", repo.name)));
+            &format!("Unauthorized, no writable repo: {}", repo.name)))
     }
-
-    let user_with_roles = ext.get::<UserRoles>().ok_or(ErrorBadRequest("no user roles"))?;
-    info!("check write access to repo: {:?} {} for user: {:?}", repo.name, path, user_with_roles);
-
-    Ok(())
 }
 
 fn ensure_read_access(req: &HttpRequest, path: &String) -> Result<(), RegistryError> {
@@ -416,17 +419,22 @@ fn ensure_read_access(req: &HttpRequest, path: &String) -> Result<(), RegistryEr
 
 fn get_writable_repo(req: &HttpRequest) -> Result<Repository, RegistryError> {
     let ext = req.extensions();
-    let named_repo = ext.get::<NamedRepository>().ok_or(RegistryError::new(
+    let repo = ext.get::<NamedRepository>().ok_or(RegistryError::new(
         StatusCode::INTERNAL_SERVER_ERROR,
         "INTERNAL_SERVER_ERROR",
         &"No repository found in request".to_string(),
     ))?;
-    let repo = named_repo.repository.as_ref().ok_or(RegistryError::new(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "INTERNAL_SERVER_ERROR",
-        &"No repository found in request".to_string(),
-    ))?;
-    Ok(repo.clone())
+
+    match &repo.repository {
+        WriteableRepository(r) => {
+            Ok(r.clone())
+        }
+        _ => Err(RegistryError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_SERVER_ERROR",
+            &"No repository found in request".to_string(),
+        ))
+    }
 }
 
 pub async fn user_authorization_check(
@@ -505,15 +513,13 @@ fn insert_resolved_repo(req: ServiceRequest) -> Result<ServiceRequest, (Error, S
         (Some(r), _) => {
             Some(NamedRepository {
                 name: r.0.clone(),
-                repository: Some(r.1.clone()),
-                proxy: None,
+                repository: WriteableRepository(r.1.clone()),
             })
         }
         (_, Some(p)) => {
             Some(NamedRepository {
                 name: p.0.clone(),
-                repository: None,
-                proxy: Some(p.1.clone()),
+                repository: ReadOnlyProxy(p.1.clone()),
             })
         }
         _ => None
@@ -568,7 +574,7 @@ async fn handle_v2_catalog(req: HttpRequest) -> Result<Json<RepositoryInfo>, Err
 
 #[post("/v2/{repo_name:.*}/blobs/uploads/")]
 async fn handle_post(
-    info: web::Path<ImageName>,
+    info: Path<ImageName>,
     req: HttpRequest) -> Result<HttpResponse, RegistryError> {
     ensure_write_access(&req, &info.repo_name)?;
 
@@ -584,7 +590,7 @@ async fn handle_post(
 
 #[patch("/v2/{repo_name:.*}/blobs/uploads/{uuid}")]
 async fn handle_patch(
-    info: web::Path<ImageNameWithUUID>,
+    info: Path<ImageNameWithUUID>,
     req: HttpRequest,
     mut payload: Payload,
 ) -> Result<HttpResponse, RegistryError> {
@@ -604,17 +610,22 @@ async fn handle_patch(
         .finish())
 }
 
+fn resolve_manifest_file(req: HttpRequest, info: &Path<ImageNameWithTag>) -> Result<File, RegistryError> {
+    let ext = req.extensions();
+    let named_repo = ext.get::<NamedRepository>().unwrap();
+    let file_path = &named_repo.repository.lookup_manifest_file(info)?;
+    let file = File::open(file_path).map_err(map_to_not_found)?;
+    Ok(file)
+}
+
 #[get("/v2/{repo_name:.*}/manifests/{tag}")]
 async fn handle_get_manifest_by_tag(
     req: HttpRequest,
-    info: web::Path<ImageNameWithTag>,
+    info: Path<ImageNameWithTag>,
 ) -> Result<HttpResponse, RegistryError> {
     ensure_read_access(&req, &info.repo_name)?;
 
-    let ext = req.extensions();
-    let repo = ext.get::<NamedRepository>().unwrap();
-    let file_path = &repo.lookup_manifest_file(&info)?;
-    let mut file = File::open(file_path).map_err(map_to_not_found)?;
+    let mut file = resolve_manifest_file(req, &info)?;
 
     let mut buffer = Vec::new();
     file.read_to_end(&mut buffer)?;
@@ -635,13 +646,11 @@ async fn handle_get_manifest_by_tag(
 #[head("/v2/{repo_name:.*}/manifests/{tag}")]
 async fn handle_head_manifest_by_tag(
     req: HttpRequest,
-    info: web::Path<ImageNameWithTag>,
+    info: Path<ImageNameWithTag>,
 ) -> Result<HttpResponse, RegistryError> {
     ensure_read_access(&req, &info.repo_name)?;
 
-    let ext = req.extensions();
-    let repo = ext.get::<NamedRepository>().unwrap();
-    let file = repo.lookup_manifest_file(&info)?;
+    let file = resolve_manifest_file(req, &info)?;
     let metadata = file.metadata()?;
 
     if metadata.len() == 0 || metadata.is_dir() {
@@ -656,18 +665,23 @@ async fn handle_head_manifest_by_tag(
         .finish())
 }
 
+fn resolve_layer_path(req: &HttpRequest, info: &Path<ImageNameWithDigest>) -> Result<PathBuf, RegistryError> {
+    let layer_path = {
+        let ext = req.extensions();
+        let named_repo = ext.get::<NamedRepository>().unwrap();
+        named_repo.repository.lookup_blob_file(info)?
+    };
+    Ok(layer_path)
+}
+
 #[get("/v2/{repo_name:.*}/blobs/{digest}")]
 async fn handle_get_layer_by_hash(
     req: HttpRequest,
-    info: web::Path<ImageNameWithDigest>,
+    info: Path<ImageNameWithDigest>,
 ) -> Result<HttpResponse, RegistryError> {
     ensure_read_access(&req, &info.repo_name)?;
 
-    let layer_path = {
-        let ext = req.extensions();
-        let repo = ext.get::<NamedRepository>().unwrap();
-        repo.lookup_blob_file(&info)?
-    };
+    let layer_path = resolve_layer_path(&req, &info)?;
 
     let file = actix_files::NamedFile::open_async(&layer_path)
         .await
@@ -684,31 +698,30 @@ async fn handle_get_layer_by_hash(
     Ok(file.into_response(&req))
 }
 
+
 #[head("/v2/{repo_name:.*}/blobs/{digest}")]
 async fn handle_head_layer_by_hash(
     req: HttpRequest,
-    info: web::Path<ImageNameWithDigest>,
+    info: Path<ImageNameWithDigest>,
 ) -> Result<HttpResponse, RegistryError> {
     ensure_read_access(&req, &info.repo_name)?;
 
-    let layer_path = {
-        let ext = req.extensions();
-        let repo = ext.get::<NamedRepository>().unwrap();
-        repo.lookup_blob_file(&info)?
-    };
+    let layer_path = resolve_layer_path(&req, &info)?;
+
     trace!("head: layer_path: {}", layer_path.display());
 
-    let file = actix_files::NamedFile::open_async(&layer_path)
-        .await
-        .map_err(map_to_not_found)?;
-
-    if file.metadata().is_dir() {
+    if !layer_path.is_file() {
         return Err(RegistryError::new(
             StatusCode::NOT_FOUND,
             "LAYER_UNKNOWN",
             &format!("file {} for {} not found: is a directory", info.digest, info.repo_name),
         ));
     }
+
+    let file = actix_files::NamedFile::open_async(&layer_path)
+        .await
+        .map_err(map_to_not_found)?;
+
     debug!("return layer_path: {}", layer_path.display());
     Ok(HttpResponseBuilder::new(StatusCode::OK)
         .insert_header((CONTENT_LENGTH, file.metadata().len()))
@@ -719,7 +732,7 @@ async fn handle_head_layer_by_hash(
 #[put("/v2/{repo_name:.*}/blobs/uploads/{uuid}")]
 async fn handle_put_with_digest(
     digest_param: web::Query<DigestParam>,
-    info: web::Path<ImageNameWithUUID>,
+    info: Path<ImageNameWithUUID>,
     req: HttpRequest,
 ) -> Result<HttpResponse, RegistryError> {
     ensure_write_access(&req, &info.repo_name)?;
@@ -741,7 +754,7 @@ async fn handle_put_with_digest(
 #[put("/v2/{repo_name:.*}/manifests/{tag}")]
 async fn handle_put_manifest_by_tag(
     req: HttpRequest,
-    info: web::Path<ImageNameWithTag>,
+    info: Path<ImageNameWithTag>,
     mut payload: Payload,
 ) -> Result<HttpResponse, RegistryError> {
     ensure_write_access(&req, &info.repo_name)?;
@@ -875,8 +888,7 @@ mod tests {
 
         req.extensions_mut().insert(NamedRepository {
             name: "repo1".to_string(),
-            repository: Some(repo),
-            proxy: None,
+            repository: WriteableRepository(repo),
         });
 
         assert_eq!(layer_path, &PathBuf::from("/tmp/foo/bar"));
@@ -935,12 +947,11 @@ mod tests {
 
         req.extensions_mut().insert(NamedRepository {
             name: "repo1".to_string(),
-            repository: Some(Repository {
+            repository: WriteableRepository(Repository {
                 storage_path: "/tmp".to_string(),
                 bind_address: Some("[::]:8080".to_string()),
                 tls_config: None,
             }),
-            proxy: None,
         });
 
         req.extensions_mut().insert(UserRoles {
