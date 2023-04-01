@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use actix_web::{App, Error, get, head, http::header, HttpMessage, HttpRequest, HttpResponse, HttpResponseBuilder, HttpServer, middleware, patch, post, put, Result, web};
 use actix_web::dev::ServiceRequest;
-use actix_web::error::{ErrorBadRequest, ErrorForbidden};
+use actix_web::error::ErrorBadRequest;
 use actix_web::http::header::CONTENT_LENGTH;
 use actix_web::http::StatusCode;
 use actix_web::web::{Data, Json, Payload};
@@ -14,7 +14,6 @@ use actix_web_httpauth::middleware::HttpAuthentication;
 use futures_util::StreamExt;
 use lazy_static::lazy_static;
 use log::{debug, info, trace};
-use path_clean::PathClean;
 use ring::digest::{Context, SHA256};
 use tokio::sync::Mutex;
 use uuid::*;
@@ -55,6 +54,11 @@ mod api_objects {
     }
 
     #[derive(Deserialize)]
+    pub struct ImageName {
+        pub repo_name: String,
+    }
+
+    #[derive(Deserialize)]
     pub struct ImageNameWithTag {
         pub repo_name: String,
         pub tag: String,
@@ -75,45 +79,44 @@ mod configuration {
     use std::collections::HashMap;
     use std::fs::File;
     use std::io::BufReader;
+    use std::path::PathBuf;
 
-    use async_trait::async_trait;
+    use log::debug;
+    use path_clean::PathClean;
     use rustls::{Certificate, PrivateKey, ServerConfig};
     use rustls_pemfile::{certs, rsa_private_keys};
     use serde::Deserialize;
 
+    use crate::api_objects::{ImageNameWithDigest, ImageNameWithTag};
+    use crate::error::RegistryError;
     #[cfg(feature = "ldap")]
     use crate::ldap::LdapConfig;
 
-    pub trait SocketSpecification: StorageSpecification {
-        fn get_bind_address(&self) -> String;
+    pub trait SocketSpecification {
+        fn get_bind_address(&self) -> Option<String>;
         fn get_tls_config(&self) -> Option<TlsConfig>;
     }
 
-    #[async_trait]
-    pub trait StorageSpecification {
-        fn get_storage_path(&self) -> String;
-        // async fn load_manifest_by_tag(&self, image: &ImageNameWithTag);
-        // async fn load_manifest_by_digest(&self, image: &ImageNameWithDigest);
-        // async fn load_blob_by_digest(&self, image: &ImageNameWithDigest);
-        // async fn load_blob_by_tag(&self, image: &ImageNameWithTag);
+    pub trait ReadableRepository {
+        fn get_layer_path(&self, path: &str) -> Result<PathBuf, RegistryError>;
+        fn lookup_manifest_file(&self, info: &ImageNameWithTag) -> Result<PathBuf, RegistryError>;
+        fn lookup_blob_file(&self, info: &ImageNameWithDigest) -> Result<PathBuf, RegistryError>;
+    }
+
+    pub trait TlsServerConfiguration: SocketSpecification {
+        fn load_rustls_config(&self) -> ServerConfig;
     }
 
     #[derive(Debug, Clone, Deserialize)]
     pub struct Repository {
         pub storage_path: String,
         #[serde(default = "default_http_port")]
-        pub bind_address: String,
+        pub bind_address: Option<String>,
         pub tls_config: Option<TlsConfig>,
     }
 
-    impl StorageSpecification for Repository {
-        fn get_storage_path(&self) -> String {
-            self.storage_path.clone()
-        }
-    }
-
     impl SocketSpecification for Repository {
-        fn get_bind_address(&self) -> String {
+        fn get_bind_address(&self) -> Option<String> {
             self.bind_address.clone()
         }
         fn get_tls_config(&self) -> Option<TlsConfig> {
@@ -125,11 +128,19 @@ mod configuration {
     pub struct Proxy {
         pub storage_path: String,
         #[serde(default = "default_http_port")]
-        pub bind_address: String,
+        pub bind_address: Option<String>,
         pub tls_config: Option<TlsConfig>,
         pub remote_url: String,
     }
 
+    impl SocketSpecification for Proxy {
+        fn get_bind_address(&self) -> Option<String> {
+            self.bind_address.clone()
+        }
+        fn get_tls_config(&self) -> Option<TlsConfig> {
+            self.tls_config.clone()
+        }
+    }
 
     #[derive(Debug, Clone, Deserialize)]
     pub struct Registry {
@@ -145,21 +156,81 @@ mod configuration {
         pub proxy: Option<Proxy>,
     }
 
-    impl StorageSpecification for NamedRepository {
-        fn get_storage_path(&self) -> String {
-            if let Some(proxy) = &self.proxy {
-                proxy.storage_path.clone()
-            } else if let Some(repo) = &self.repository {
-                repo.storage_path.clone()
+    impl NamedRepository {
+        pub(crate) fn get_readable_repository(&self) -> &dyn ReadableRepository {
+            let is_proxy = self.proxy.is_some();
+            if is_proxy {
+                let proxy = self.proxy.as_ref().unwrap();
+                proxy
             } else {
-                panic!("Neither repository nor proxy is set for this request")
+                let repo = self.repository.as_ref().unwrap();
+                repo
             }
         }
     }
 
-    pub trait TlsServerConfiguration {
-        fn load_rustls_config(self: &Self) -> ServerConfig;
+    impl ReadableRepository for NamedRepository {
+        fn get_layer_path(&self, path: &str) -> Result<PathBuf, RegistryError> {
+            self.get_readable_repository().get_layer_path(path)
+        }
+
+        fn lookup_manifest_file(&self, info: &ImageNameWithTag) -> Result<PathBuf, RegistryError> {
+            self.get_readable_repository().lookup_manifest_file(info)
+        }
+
+        fn lookup_blob_file(&self, info: &ImageNameWithDigest) -> Result<PathBuf, RegistryError> {
+            self.get_readable_repository().lookup_blob_file(info)
+        }
     }
+
+    impl ReadableRepository for Repository {
+        fn get_layer_path(&self, path: &str) -> Result<PathBuf, RegistryError> {
+            // clean() will remove any "." and ".." from the path
+            let sub_path = PathBuf::from(format!("/{}", path)).clean();
+            let target_path = format!("{}/{}", self.storage_path, sub_path.display());
+
+            // second clean() to ensure that the path is clean
+            Ok(PathBuf::from(target_path).clean())
+        }
+
+        fn lookup_manifest_file(&self, info: &ImageNameWithTag) -> Result<PathBuf, RegistryError> {
+            let manifest_path = Self::get_layer_path(self, &format!("{}/manifests/{}.json", info.repo_name, info.tag))?;
+            debug!("manifest_path: {}", manifest_path.display());
+            Ok(manifest_path)
+        }
+
+        fn lookup_blob_file(&self, info: &ImageNameWithDigest) -> Result<PathBuf, RegistryError> {
+            let blob_path = Self::get_layer_path(self, &format!("{}/blobs/{}", info.repo_name, info.digest))?;
+            debug!("blob_path: {}", blob_path.display());
+            Ok(blob_path)
+        }
+    }
+
+    impl ReadableRepository for Proxy {
+        fn get_layer_path(&self, _path: &str) -> Result<PathBuf, RegistryError> {
+            panic!("not implemented")
+        }
+
+        fn lookup_manifest_file(&self, _info: &ImageNameWithTag) -> Result<PathBuf, RegistryError> {
+            panic!("not implemented")
+        }
+
+        fn lookup_blob_file(&self, _info: &ImageNameWithDigest) -> Result<PathBuf, RegistryError> {
+            panic!("not implemented")
+        }
+    }
+
+    #[derive(Debug, Clone, Deserialize)]
+    pub struct UserRoles {
+        pub username: String,
+        pub roles: Vec<String>,
+    }
+
+    fn default_http_port() -> Option<String> {
+        Some("[::]:8080".to_string())
+    }
+
+    fn default_https_port() -> String { "[::]:8443".to_string() }
 
     #[derive(Debug, Clone, Deserialize)]
     pub struct TlsConfig {
@@ -169,18 +240,13 @@ mod configuration {
         pub bind_address: String,
     }
 
-    #[derive(Debug, Clone, Deserialize)]
-    pub struct UserRoles {
-        pub username: String,
-        pub roles: Vec<String>,
-    }
-
-    fn default_http_port() -> String {
-        "[::]:8080".to_string()
-    }
-
-    fn default_https_port() -> String {
-        "[::]:8443".to_string()
+    impl SocketSpecification for TlsConfig {
+        fn get_bind_address(&self) -> Option<String> {
+            Some(self.bind_address.clone())
+        }
+        fn get_tls_config(&self) -> Option<TlsConfig> {
+            Some(self.clone())
+        }
     }
 
     impl TlsServerConfiguration for TlsConfig {
@@ -282,17 +348,6 @@ pub struct AppState {
     pub registry: Arc<Registry>,
 }
 
-fn get_layer_path(_req: &HttpRequest, path: &String) -> PathBuf {
-    let extensions = _req.extensions();
-    let repo: &NamedRepository = extensions.get().unwrap();
-    // clean() will remove any "." and ".." from the path
-    let sub_path = PathBuf::from(format!("/{}", path)).clean();
-    let target_path = format!("{}/{}", repo.get_storage_path(), sub_path.display());
-
-    // second clean() to ensure that the path is clean
-    PathBuf::from(target_path).clean()
-}
-
 /**
 Upload file and calculate sha256
  */
@@ -332,13 +387,150 @@ fn create_or_replace_file(path_to_file: &PathBuf) -> Result<File, RegistryError>
     Ok(manifest_file)
 }
 
-fn lookup_manifest_file(req: HttpRequest, info: &ImageNameWithTag) -> Result<File, RegistryError> {
-    let manifest_path = get_layer_path(&req, &format!("{}/manifests/{}.json", info.repo_name, info.tag));
-    debug!("manifest_path: {}", manifest_path.display());
-    let file = File::open(manifest_path).map_err(map_to_not_found)?;
-    Ok(file)
+fn ensure_write_access(req: &HttpRequest, path: &String) -> Result<(), RegistryError> {
+    let ext = req.extensions();
+    let repo = ext.get::<NamedRepository>().unwrap();
+    info!("repo: {:?}", repo.name);
+    if repo.repository.is_none() {
+        return Err(RegistryError::new(
+            StatusCode::FORBIDDEN,
+            "FORBIDDEN",
+            &format!("Unauthorized, no writable repo: {}", repo.name)));
+    }
+
+    let user_with_roles = ext.get::<UserRoles>().ok_or(ErrorBadRequest("no user roles"))?;
+    info!("check write access to repo: {:?} {} for user: {:?}", repo.name, path, user_with_roles);
+
+    Ok(())
 }
 
+fn ensure_read_access(req: &HttpRequest, path: &String) -> Result<(), RegistryError> {
+    let ext = req.extensions();
+    let user_with_roles = ext.get::<UserRoles>().ok_or(ErrorBadRequest("no user roles"))?;
+    let repo = ext.get::<NamedRepository>().unwrap();
+
+    info!("check read access to repo: {:?} {} for user: {:?}", repo.name, path, user_with_roles);
+
+    Ok(())
+}
+
+fn get_writable_repo(req: &HttpRequest) -> Result<Repository, RegistryError> {
+    let ext = req.extensions();
+    let named_repo = ext.get::<NamedRepository>().ok_or(RegistryError::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "INTERNAL_SERVER_ERROR",
+        &"No repository found in request".to_string(),
+    ))?;
+    let repo = named_repo.repository.as_ref().ok_or(RegistryError::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "INTERNAL_SERVER_ERROR",
+        &"No repository found in request".to_string(),
+    ))?;
+    Ok(repo.clone())
+}
+
+pub async fn user_authorization_check(
+    req: ServiceRequest,
+    _credentials: Option<BearerAuth>,
+) -> Result<ServiceRequest, (Error, ServiceRequest)> {
+    let req = insert_resolved_repo(req)?;
+    #[cfg(feature = "ldap")]
+    {
+        let basic_auth: Option<String> = req
+            .headers()
+            .get("authorization")
+            .and_then(|h| h.to_str().ok())
+            .and_then(|auth| auth.strip_prefix("Basic "))
+            .map(|s| s.to_string());
+
+        // let bearer_auth = credentials.map(|c| c.token().to_string());
+
+        let app_config = req.app_data::<Data<AppState>>();
+        let reg_arc = app_config.unwrap().registry.as_ref();
+
+        match get_roles_for_authentication(basic_auth, reg_arc).await {
+            Ok(user) => {
+                req.extensions_mut().insert(user);
+                Ok(req)
+            }
+            Err(e) =>
+                Err((e.into(), req)),
+        }
+    }
+    #[cfg(not(feature = "ldap"))]
+    {
+        let anon_user = UserRoles {
+            username: "anonymous".to_string(),
+            roles: vec!["*".to_string()],
+        };
+        req.extensions_mut().insert(anon_user);
+        Ok(req)
+    }
+}
+
+fn insert_resolved_repo(req: ServiceRequest) -> Result<ServiceRequest, (Error, ServiceRequest)> {
+    let request_host = req.app_config().host().to_string();
+    let wrapped_host = Some(request_host.clone());
+    let is_tls = req.app_config().secure();
+    let reg = req.app_data::<Data<AppState>>().unwrap().as_ref();
+    let app_config = reg.registry.as_ref();
+
+    let repo = if is_tls {
+        app_config.repositories.iter().find(|&r| {
+            let request_host = request_host.clone();
+            let tls_cfg = &r.1.tls_config;
+            if tls_cfg.is_none() {
+                false
+            } else if let Some(tls_config) = tls_cfg.as_ref() {
+                tls_config.bind_address == request_host
+            } else {
+                false
+            }
+        })
+    } else {
+        app_config.repositories.iter().find(|&r| r.1.bind_address == wrapped_host)
+    };
+
+    let proxy = if is_tls {
+        app_config.proxies.iter().find(|&r| {
+            let request_host = request_host.clone();
+            let tls_cfg = r.1.tls_config.as_ref().unwrap();
+            tls_cfg.bind_address == request_host
+        })
+    } else {
+        app_config.proxies.iter().find(|&r| r.1.bind_address == wrapped_host)
+    };
+
+    let named_repo = match (repo, proxy) {
+        (Some(r), _) => {
+            Some(NamedRepository {
+                name: r.0.clone(),
+                repository: Some(r.1.clone()),
+                proxy: None,
+            })
+        }
+        (_, Some(p)) => {
+            Some(NamedRepository {
+                name: p.0.clone(),
+                repository: None,
+                proxy: Some(p.1.clone()),
+            })
+        }
+        _ => None
+    };
+
+    match named_repo {
+        Some(r) => {
+            trace!("insert_resolved_repo: request_host: {}, is_tls: {}, repo: {:?}", &request_host, is_tls, repo);
+            req.extensions_mut().insert(r);
+            Ok(req)
+        }
+        None => Err((RegistryError::new(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            &format!("Not found, no repo config for host {}", &request_host)).into(), req)),
+    }
+}
 
 #[get("/v2/")]
 async fn handle_get_v2(req: HttpRequest) -> Result<HttpResponse, Error> {
@@ -374,48 +566,18 @@ async fn handle_v2_catalog(req: HttpRequest) -> Result<Json<RepositoryInfo>, Err
     Ok(Json(RepositoryInfo { repositories }))
 }
 
-fn ensure_write_access(req: &HttpRequest) -> Result<(), RegistryError> {
-    let ext = req.extensions();
-    let repo = ext.get::<NamedRepository>().unwrap();
-    info!("repo: {:?}", repo.name);
-    if repo.repository.is_none() {
-        return Err(RegistryError::new(
-            StatusCode::FORBIDDEN,
-            "FORBIDDEN",
-            &format!("Unauthorized, no writable repo: {}", repo.name)));
-    }
-
-    let user_with_roles = ext.get::<UserRoles>().ok_or(ErrorBadRequest("no user roles"))?;
-    info!("userWithRoles: {:?}", user_with_roles);
-
-    Ok(())
-}
-
-fn ensure_read_access(req: &HttpRequest) -> Result<(), RegistryError> {
-    let ext = req.extensions();
-    let user_with_roles = ext.get::<UserRoles>().ok_or(ErrorBadRequest("no user roles"))?;
-    info!("userWithRoles: {:?}", user_with_roles);
-
-    let repo = ext.get::<NamedRepository>().unwrap();
-    info!("repo: {:?}", repo.name);
-
-    Ok(())
-}
-
 #[post("/v2/{repo_name:.*}/blobs/uploads/")]
-async fn handle_post(req: HttpRequest) -> Result<HttpResponse, RegistryError> {
-    let repo_name = req
-        .match_info()
-        .get("repo_name")
-        .ok_or(ErrorBadRequest("repo_name not present"))?;
-    let uuid = Uuid::new_v4();
+async fn handle_post(
+    info: web::Path<ImageName>,
+    req: HttpRequest) -> Result<HttpResponse, RegistryError> {
+    ensure_write_access(&req, &info.repo_name)?;
 
-    ensure_write_access(&req)?;
+    let uuid = Uuid::new_v4();
 
     Ok(HttpResponseBuilder::new(StatusCode::ACCEPTED)
         .insert_header((
             header::LOCATION,
-            format!("/v2/{}/blobs/uploads/{}", &repo_name, uuid),
+            format!("/v2/{}/blobs/uploads/{}", &info.repo_name, uuid),
         ))
         .finish())
 }
@@ -426,9 +588,13 @@ async fn handle_patch(
     req: HttpRequest,
     mut payload: Payload,
 ) -> Result<HttpResponse, RegistryError> {
-    ensure_write_access(&req)?;
+    ensure_write_access(&req, &info.repo_name)?;
 
-    let upload_path = get_layer_path(&req, &format!("{}/blobs/uploads/{}", info.repo_name, info.uuid));
+    let upload_path = {
+        let repo = get_writable_repo(&req)?;
+        repo.get_layer_path(&format!("{}/blobs/uploads/{}", info.repo_name, info.uuid))?
+    };
+
     let uploaded_file = write_payload_to_file(&mut payload, &upload_path).await?;
 
     Ok(HttpResponseBuilder::new(StatusCode::ACCEPTED)
@@ -443,11 +609,13 @@ async fn handle_get_manifest_by_tag(
     req: HttpRequest,
     info: web::Path<ImageNameWithTag>,
 ) -> Result<HttpResponse, RegistryError> {
-    ensure_read_access(&req)?;
+    ensure_read_access(&req, &info.repo_name)?;
 
-    let mut file = lookup_manifest_file(req, &info)?;
+    let ext = req.extensions();
+    let repo = ext.get::<NamedRepository>().unwrap();
+    let file_path = &repo.lookup_manifest_file(&info)?;
+    let mut file = File::open(file_path).map_err(map_to_not_found)?;
 
-    // read file as string
     let mut buffer = Vec::new();
     file.read_to_end(&mut buffer)?;
 
@@ -469,10 +637,13 @@ async fn handle_head_manifest_by_tag(
     req: HttpRequest,
     info: web::Path<ImageNameWithTag>,
 ) -> Result<HttpResponse, RegistryError> {
-    ensure_read_access(&req)?;
+    ensure_read_access(&req, &info.repo_name)?;
 
-    let file = lookup_manifest_file(req, &info)?;
+    let ext = req.extensions();
+    let repo = ext.get::<NamedRepository>().unwrap();
+    let file = repo.lookup_manifest_file(&info)?;
     let metadata = file.metadata()?;
+
     if metadata.len() == 0 || metadata.is_dir() {
         return Err(RegistryError::new(
             StatusCode::NOT_FOUND,
@@ -485,14 +656,19 @@ async fn handle_head_manifest_by_tag(
         .finish())
 }
 
-#[get("/v2/{repo_name:.*}/{digest}")]
+#[get("/v2/{repo_name:.*}/blobs/{digest}")]
 async fn handle_get_layer_by_hash(
     req: HttpRequest,
     info: web::Path<ImageNameWithDigest>,
 ) -> Result<HttpResponse, RegistryError> {
-    ensure_read_access(&req)?;
+    ensure_read_access(&req, &info.repo_name)?;
 
-    let layer_path = get_layer_path(&req, &format!("{}/{}", info.repo_name, info.digest));
+    let layer_path = {
+        let ext = req.extensions();
+        let repo = ext.get::<NamedRepository>().unwrap();
+        repo.lookup_blob_file(&info)?
+    };
+
     let file = actix_files::NamedFile::open_async(&layer_path)
         .await
         .map_err(map_to_not_found)?;
@@ -513,9 +689,13 @@ async fn handle_head_layer_by_hash(
     req: HttpRequest,
     info: web::Path<ImageNameWithDigest>,
 ) -> Result<HttpResponse, RegistryError> {
-    ensure_read_access(&req)?;
+    ensure_read_access(&req, &info.repo_name)?;
 
-    let layer_path = get_layer_path(&req, &format!("{}/blobs/{}", info.repo_name, info.digest));
+    let layer_path = {
+        let ext = req.extensions();
+        let repo = ext.get::<NamedRepository>().unwrap();
+        repo.lookup_blob_file(&info)?
+    };
     trace!("head: layer_path: {}", layer_path.display());
 
     let file = actix_files::NamedFile::open_async(&layer_path)
@@ -536,18 +716,18 @@ async fn handle_head_layer_by_hash(
         .finish())
 }
 
-
 #[put("/v2/{repo_name:.*}/blobs/uploads/{uuid}")]
 async fn handle_put_with_digest(
     digest_param: web::Query<DigestParam>,
     info: web::Path<ImageNameWithUUID>,
     req: HttpRequest,
 ) -> Result<HttpResponse, RegistryError> {
-    ensure_write_access(&req)?;
+    ensure_write_access(&req, &info.repo_name)?;
+    let writable_repo = get_writable_repo(&req)?;
 
     let layer_path = format!("{}/blobs/{}", info.repo_name, digest_param.digest);
-    let upload_path = get_layer_path(&req, &format!("{}/blobs/uploads/{}", info.repo_name, info.uuid));
-    let path_to_file = get_layer_path(&req, &layer_path);
+    let upload_path = writable_repo.get_layer_path(&format!("{}/blobs/uploads/{}", info.repo_name, info.uuid))?;
+    let path_to_file = writable_repo.get_layer_path(&layer_path)?;
 
     // mutex to prevent concurrent writes to the same file
     trace!("Moving upload_path: {} to path_to_file: {}", upload_path.display(), path_to_file.display());
@@ -564,20 +744,21 @@ async fn handle_put_manifest_by_tag(
     info: web::Path<ImageNameWithTag>,
     mut payload: Payload,
 ) -> Result<HttpResponse, RegistryError> {
-    ensure_write_access(&req)?;
+    ensure_write_access(&req, &info.repo_name)?;
 
     lazy_static! {
         static ref LOCK_MUTEX:Mutex<u16> = Mutex::new(0);
     }
+    let manifest_path = get_writable_repo(&req)?
+        .get_layer_path(&format!("{}/manifests/{}.json", info.repo_name, info.tag))?;
 
-    let manifest_path = get_layer_path(&req, &format!("{}/manifests/{}.json", info.repo_name, info.tag));
     debug!("manifest_path: {}", manifest_path.display());
 
     let uploaded_path = write_payload_to_file(&mut payload, &manifest_path).await?;
 
     // manifest is stored as tag and sha256:digest
-    let manifest_digest_path =
-        get_layer_path(&req, &format!("{}/manifests/sha256:{}.json", info.repo_name, uploaded_path.sha256));
+    let manifest_digest_path = get_writable_repo(&req)?
+        .get_layer_path(&format!("{}/manifests/sha256:{}.json", info.repo_name, uploaded_path.sha256))?;
     trace!("manifest_path: {} linked as {}", &manifest_path.display(), manifest_digest_path.display());
 
     // lock to prevent concurrent writes to the same file
@@ -606,103 +787,9 @@ async fn handle_default(req: HttpRequest) -> HttpResponse {
     HttpResponseBuilder::new(StatusCode::NOT_FOUND).json(errors)
 }
 
-pub async fn user_authorization_check(
-    req: ServiceRequest,
-    credentials: Option<BearerAuth>,
-) -> Result<ServiceRequest, (Error, ServiceRequest)> {
-    let req = insert_resolved_repo(req)?;
-    #[cfg(feature = "ldap")]
-    {
-        let basic_auth: Option<String> = req
-            .headers()
-            .get("authorization")
-            .and_then(|h| h.to_str().ok())
-            .and_then(|auth| auth.strip_prefix("Basic "))
-            .map(|s| s.to_string());
-
-        let bearer_auth = credentials.map(|c| c.token().to_string());
-
-        let app_config = req.app_data::<Data<AppState>>();
-        let reg_arc = app_config.unwrap().registry.as_ref();
-
-        match get_roles_for_authentication(basic_auth, reg_arc).await {
-            Ok(user) => {
-                req.extensions_mut().insert(user);
-                Ok(req)
-            }
-            Err(e) =>
-                Err((e.into(), req)),
-        }
-    }
-    #[cfg(not(feature = "ldap"))]
-    {
-        let anon_user = UserRoles {
-            username: "anonymous".to_string(),
-            roles: vec!["*".to_string()],
-        };
-        req.extensions_mut().insert(anon_user);
-        Ok(req)
-    }
-}
-
-fn insert_resolved_repo(req: ServiceRequest) -> Result<ServiceRequest, (Error, ServiceRequest)> {
-    let request_host = req.app_config().host();
-    let is_tls = req.app_config().secure();
-    let reg = req.app_data::<Data<AppState>>().unwrap().as_ref();
-    let app_config = reg.registry.as_ref();
-
-    let repo = if is_tls {
-        app_config.repositories.iter().find(|&r| {
-            let tls_cfg = r.1.tls_config.as_ref().unwrap();
-            tls_cfg.bind_address == request_host
-        })
-    } else {
-        app_config.repositories.iter().find(|&r| r.1.bind_address == request_host)
-    };
-
-    let proxy = if is_tls {
-        app_config.proxies.iter().find(|&r| {
-            let tls_cfg = r.1.tls_config.as_ref().unwrap();
-            tls_cfg.bind_address == request_host
-        })
-    } else {
-        app_config.proxies.iter().find(|&r| r.1.bind_address == request_host)
-    };
-
-    let named_repo = match (repo, proxy) {
-        (Some(r), _) => {
-            Some(NamedRepository {
-                name: r.0.clone(),
-                repository: Some(r.1.clone()),
-                proxy: None,
-            })
-        }
-        (_, Some(p)) => {
-            Some(NamedRepository {
-                name: p.0.clone(),
-                repository: None,
-                proxy: Some(p.1.clone()),
-            })
-        }
-        _ => None
-    };
-
-    match named_repo {
-        Some(r) => {
-            trace!("insert_resolved_repo: request_host: {}, is_tls: {}, repo: {:?}", request_host, is_tls, repo);
-            req.extensions_mut().insert(r);
-            Ok(req)
-        }
-        None => Err((RegistryError::new(
-            StatusCode::NOT_FOUND,
-            "NOT_FOUND",
-            &format!("Not found, no repo config for host {}", request_host)).into(), req)),
-    }
-}
-
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    env_logger::init_from_env(env_logger::Env::new().default_filter_or("info,rust_registry=trace"));
+    env_logger::init_from_env(env_logger::Env::new().default_filter_or("info,rust_registry=debug"));
 
     let registry_config: Registry =
         serde_json::from_reader(File::open("config.json").unwrap()).unwrap();
@@ -732,31 +819,30 @@ async fn main() -> std::io::Result<()> {
             .default_service(web::route().to(handle_default))
     });
 
-    let http_binds = registry_config
-        .repositories
-        .iter()
-        .map(|repo| &repo.1.bind_address)
-        .collect::<Vec<&String>>();
+    let mut endpoints: Vec<&dyn SocketSpecification> = vec![];
 
-    let https_cfgs = registry_config
-        .repositories
-        .iter()
-        .filter_map(|repo| repo.1.tls_config.as_ref())
-        .collect::<Vec<&TlsConfig>>();
+    registry_config.repositories.iter().for_each(|x| { endpoints.push(x.1); });
+    registry_config.proxies.iter().for_each(|x| { endpoints.push(x.1); });
 
-    let server = http_binds.into_iter().fold(server, |s, x| {
-        trace!("binding http: {}", x);
-        s.bind(x).unwrap()
-    });
-    let server = https_cfgs.into_iter().fold(server, |s, cfg| {
-        let tls_config = cfg.load_rustls_config();
-        trace!("binding https: {}", &cfg.bind_address);
-        s.bind_rustls(&cfg.bind_address, tls_config).unwrap()
+    let server = endpoints.iter().fold(server, |s, &x| {
+        let f = if let Some(http_bind_address) = &x.get_bind_address() {
+            trace!("binding http: {}", &http_bind_address);
+            s.bind(&http_bind_address).unwrap()
+        } else {
+            s
+        };
+        if let Some(cfg) = &x.get_tls_config() {
+            let bind_address = cfg.get_bind_address().unwrap();
+            let tls_config = cfg.load_rustls_config();
+            trace!("binding https: {}", &bind_address);
+            f.bind_rustls(&bind_address, tls_config).unwrap()
+        } else {
+            f
+        }
     });
 
     server.run().await
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -769,7 +855,7 @@ mod tests {
     #[cfg(test)]
     #[ctor::ctor]
     fn init() {
-        let _ = env_logger::try_init();
+        env_logger::init_from_env(env_logger::Env::new().default_filter_or("info,rust_registry=debug"));
     }
 
     #[actix_web::test]
@@ -781,18 +867,19 @@ mod tests {
 
         let repo = Repository {
             storage_path: "/tmp".to_string(),
-            bind_address: "[::]:8080".to_string(),
+            bind_address: Some("[::]:8080".to_string()),
             tls_config: None,
         };
+        let path = "foo/bar".to_string();
+        let layer_path = &repo.get_layer_path(&path).unwrap();
+
         req.extensions_mut().insert(NamedRepository {
             name: "repo1".to_string(),
             repository: Some(repo),
             proxy: None,
         });
 
-        let path = "foo/bar".to_string();
-        let upload_path = get_layer_path(&req, &path);
-        assert_eq!(upload_path, PathBuf::from("/tmp/foo/bar"));
+        assert_eq!(layer_path, &PathBuf::from("/tmp/foo/bar"));
     }
 
     fn build_app_data() -> Data<AppState> {
@@ -800,7 +887,7 @@ mod tests {
             registry: Arc::new(Registry {
                 repositories: HashMap::from([("repo1".to_string(), Repository {
                     storage_path: "/tmp".to_string(),
-                    bind_address: "[::]:8080".to_string(),
+                    bind_address: Some("[::]:8080".to_string()),
                     tls_config: None,
                 })]),
                 proxies: HashMap::new(),
@@ -850,10 +937,15 @@ mod tests {
             name: "repo1".to_string(),
             repository: Some(Repository {
                 storage_path: "/tmp".to_string(),
-                bind_address: "[::]:8080".to_string(),
+                bind_address: Some("[::]:8080".to_string()),
                 tls_config: None,
             }),
             proxy: None,
+        });
+
+        req.extensions_mut().insert(UserRoles {
+            username: "test".to_string(),
+            roles: vec!["admin".to_string()],
         });
 
         let resp = test::call_service(&app, req).await;
