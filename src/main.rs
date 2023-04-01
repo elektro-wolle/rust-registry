@@ -343,15 +343,9 @@ fn lookup_manifest_file(req: HttpRequest, info: &ImageNameWithTag) -> Result<Fil
 async fn handle_get_v2(req: HttpRequest) -> Result<HttpResponse, Error> {
     let ext = req.extensions();
     let o = ext.get::<UserRoles>();
-    match o {
-        Some(user_with_roles) => {
-            info!("userWithRoles: {:?}", user_with_roles);
-        }
-        None => {
-            info!("userWithRoles: None");
-        }
+    if let Some(user_with_roles) = o {
+        info!("userWithRoles: {:?}", user_with_roles);
     }
-    //let userWithRoles = req.extensions_mut().get::<Box<UserRoles>>().unwrap();
 
     Ok(HttpResponseBuilder::new(StatusCode::OK)
         .insert_header(("Docker-Distribution-API-Version", "registry/2.0"))
@@ -574,7 +568,6 @@ pub async fn user_authorization_check(
     credentials: Option<BearerAuth>,
 ) -> Result<ServiceRequest, (Error, ServiceRequest)> {
     let req = insert_resolved_repo(req)?;
-
     #[cfg(feature = "ldap")]
     {
         let basic_auth: Option<String> = req
