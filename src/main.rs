@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::prelude::*;
 use std::path::PathBuf;
@@ -24,10 +25,12 @@ use crate::authentication::*;
 use crate::configuration::*;
 use crate::configuration::TargetRegistry::{ReadOnlyProxy, WriteableRepository};
 use crate::error::*;
+use crate::perm::*;
 
 #[cfg(feature = "ldap")]
 mod ldap;
 mod error;
+mod perm;
 
 mod api_objects {
     use serde::{Deserialize, Serialize};
@@ -72,7 +75,7 @@ mod api_objects {
 
     #[derive(Serialize)]
     pub struct VersionInfo {
-        pub versions: Vec<String>,
+        pub versions: Vec<&'static str>,
     }
 }
 
@@ -296,7 +299,9 @@ mod authentication {
     use crate::ldap::authenticate_and_get_groups;
 
     pub async fn get_roles_for_authentication(basic_auth: Option<String>, reg_arc: &Registry) -> Result<UserRoles, RegistryError> {
-        let auth = basic_auth.ok_or_else(|| RegistryError::new(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", &"Unauthorized, no basic auth".to_string()))?;
+        let auth = basic_auth
+            .ok_or_else(|| RegistryError::new(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", &"Unauthorized, no basic auth".to_string()))?;
+
         let engine = engine::GeneralPurpose::new(&alphabet::URL_SAFE, general_purpose::PAD);
         let decoded = engine
             .decode(auth.as_bytes())
@@ -348,6 +353,7 @@ mod authentication {
 
 pub struct AppState {
     pub registry: Arc<Registry>,
+    pub permissions: Arc<GroupPermissions>,
 }
 
 /**
@@ -468,8 +474,8 @@ pub async fn user_authorization_check(
     #[cfg(not(feature = "ldap"))]
     {
         let anon_user = UserRoles {
-            username: "anonymous".to_string(),
-            roles: vec!["*".to_string()],
+            username: "anonymous",
+            roles: vec!["*"],
         };
         req.extensions_mut().insert(anon_user);
         Ok(req)
@@ -547,7 +553,7 @@ async fn handle_get_v2(req: HttpRequest) -> Result<HttpResponse, Error> {
     Ok(HttpResponseBuilder::new(StatusCode::OK)
         .insert_header(("Docker-Distribution-API-Version", "registry/2.0"))
         .json(VersionInfo {
-            versions: vec!["registry/2.0".to_string()],
+            versions: vec!["registry/2.0"],
         }))
 }
 
@@ -807,8 +813,21 @@ async fn main() -> std::io::Result<()> {
     let registry_config: Registry =
         serde_json::from_reader(File::open("config.json").unwrap()).unwrap();
 
+    let permissions = registry_config.ldap_config.clone().unwrap().roles;
+    let mut permissions: HashMap<String, ReadWritePermissions> = permissions
+        .iter()
+        .map(|(group, p)| (group.clone(), ReadWritePermissions::new(&p.read, &p.write)))
+        .collect();
+
+    {
+        if permissions.is_empty() {
+            permissions.insert("anonymous".to_string(), ReadWritePermissions::new(&vec![".*".to_string()], &vec![".*".to_string()]));
+        }
+    }
+
     let app_data = Data::new(AppState {
         registry: Arc::new(registry_config.clone()),
+        permissions: Arc::new(GroupPermissions::new(permissions)),
     });
 
     let server = HttpServer::new(move || {
@@ -906,6 +925,7 @@ mod tests {
                 #[cfg(feature = "ldap")]
                 ldap_config: None,
             }),
+            permissions: Arc::new(GroupPermissions::new(HashMap::new())),
         })
     }
 

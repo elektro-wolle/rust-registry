@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 #[cfg(feature = "ldap")]
 use ldap3::{Ldap, LdapConnAsync, Scope, SearchEntry};
 #[cfg(feature = "ldap")]
@@ -5,6 +7,13 @@ use ldap3::result::Result;
 use log::{info, trace, warn};
 use log::debug;
 use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg(feature = "ldap")]
+pub struct ReadWriteDefinition {
+    pub read: Vec<String>,
+    pub write: Vec<String>,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg(feature = "ldap")]
@@ -19,6 +28,8 @@ pub struct LdapConfig {
     pub group_search_filter: String,
     pub group_search_base_dn: Option<String>,
     pub group_attribute: String,
+
+    pub roles: HashMap<String, ReadWriteDefinition>,
 }
 
 fn escape_ldap_special_chars(input: &str) -> String {
@@ -73,6 +84,7 @@ async fn find_user_dn(
         }
     }
 }
+
 
 #[cfg(feature = "ldap")]
 async fn get_user_groups(
@@ -178,6 +190,10 @@ mod tests {
         );
 
         let port = container.get_host_port_ipv4(1389);
+        let rw = ReadWriteDefinition {
+            read: vec!["repo1:*".to_string()],
+            write: vec!["repo2:*".to_string()],
+        };
 
         let cfg = LdapConfig {
             ldap_url: format!("ldap://127.0.0.1:{}", port),
@@ -189,6 +205,7 @@ mod tests {
             user_search_filter: "(&(objectClass=inetOrgPerson)(uid={}))".to_string(),
             group_search_base_dn: Some("dc=example,dc=com".to_string()),
             user_search_base_dn: Some("dc=example,dc=com".to_string()),
+            roles: HashMap::from([("readers".to_string(), rw)]),
         };
 
         let groups = authenticate_and_get_groups(&cfg, "user02", "bitnami2").await.unwrap();

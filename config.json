@@ -40,14 +40,13 @@
         "group_search_filter": "(&(objectClass=groupOfNames)(member={}))",
         "group_attribute": "cn",
         "roles": {
-            "admin": {
+            "readers": {
                 "read": [
                     "*"
                 ],
                 "write": [
-                    "repo1:**",
-                    "repo2:private/**:*-SNAPSHOT",
-                    "!repo1:**:*-SNAPSHOT"
+                    "repo1:foo/*",
+                    "!repo2:*:*-SNAPSHOT"
                 ]
             }
         }
