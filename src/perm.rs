@@ -12,27 +12,32 @@ impl GroupPermissions {
     pub fn new(group_permissions: HashMap<String, ReadWritePermissions>) -> Self {
         if group_permissions.is_empty() {
             let mut permission_map = HashMap::new();
-            permission_map.insert("anonymous".to_string(), ReadWritePermissions {
-                read: Permissions::new(&vec!["*".to_string()]),
-                write: Permissions::new(&vec!["*".to_string()]),
-            });
+            permission_map.insert(
+                "anonymous".to_string(),
+                ReadWritePermissions {
+                    read: Permissions::new(&vec!["*".to_string()]),
+                    write: Permissions::new(&vec!["*".to_string()]),
+                },
+            );
 
             Self {
-                permissions_by_group: permission_map
+                permissions_by_group: permission_map,
             }
         } else {
             Self {
-                permissions_by_group: group_permissions.iter()
+                permissions_by_group: group_permissions
+                    .iter()
                     .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect()
+                    .collect(),
             }
         }
     }
 
-    fn can_access(&self,
-                  groups: Vec<String>,
-                  path: &str,
-                  check_function: fn(&ReadWritePermissions, &str) -> bool,
+    fn can_access(
+        &self,
+        groups: Vec<String>,
+        path: &str,
+        check_function: fn(&ReadWritePermissions, &str) -> bool,
     ) -> bool {
         for group in groups {
             if let Some(permissions) = self.permissions_by_group.get(&group) {
@@ -44,16 +49,16 @@ impl GroupPermissions {
         false
     }
 
-
     pub fn can_read(&self, groups: Vec<String>, path: &str) -> bool {
         self.can_access(groups, path, |permissions, path| permissions.can_read(path))
     }
 
     pub fn can_write(&self, groups: Vec<String>, path: &str) -> bool {
-        self.can_access(groups, path, |permissions, path| permissions.can_write(path))
+        self.can_access(groups, path, |permissions, path| {
+            permissions.can_write(path)
+        })
     }
 }
-
 
 #[derive(Debug, Clone)]
 pub struct ReadWritePermissions {
@@ -114,10 +119,7 @@ impl Permissions {
             }
         }
 
-        Self {
-            allow,
-            deny,
-        }
+        Self { allow, deny }
     }
 
     fn is_allowed(&self, path: &str) -> bool {
@@ -156,8 +158,11 @@ mod test {
 
     #[test]
     fn test_perm_list() {
-        let perm_list = vec!["repo1:*:*-SNAPSHOT".to_string(), "!repo1:foo/bar:*".to_string()];
-        let gp = ReadWritePermissions::new(&perm_list, &vec!());
+        let perm_list = vec![
+            "repo1:*:*-SNAPSHOT".to_string(),
+            "!repo1:foo/bar:*".to_string(),
+        ];
+        let gp = ReadWritePermissions::new(&perm_list, &vec![]);
         assert!(gp.can_read("repo1:foo/bar:1.0-SNAPSHOT"));
         assert!(!gp.can_write("repo2:foo/bar:1.0-SNAPSHOT"));
     }

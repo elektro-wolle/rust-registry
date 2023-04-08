@@ -23,23 +23,52 @@ use crate::perm::GroupPermissions;
 use crate::perm::ReadWritePermissions;
 use crate::utils::insert_resolved_repo;
 
+struct AccessForbiddenError {
+    message: String,
+}
+
+impl AccessForbiddenError {
+    fn new(message: &str) -> Self {
+        AccessForbiddenError { message: message.to_string() }
+    }
+}
+
+impl From<AccessForbiddenError> for RegistryError {
+    fn from(e: AccessForbiddenError) -> Self {
+        RegistryError::new(
+            StatusCode::FORBIDDEN,
+            "FORBIDDEN",
+            &format!("Unauthorized, error: {}", e.message),
+        )
+    }
+}
+
 #[cfg(feature = "ldap")]
-pub async fn get_roles_for_authentication(basic_auth: Option<String>, reg_arc: &Registry) -> Result<UserRoles, RegistryError> {
-    let auth = basic_auth
-        .ok_or_else(|| RegistryError::new(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", &"Unauthorized, no basic auth".to_string()))?;
+pub async fn get_roles_for_authentication(
+    basic_auth: Option<String>,
+    reg_arc: &Registry,
+) -> Result<UserRoles, RegistryError> {
+    let auth = basic_auth.ok_or_else(|| {
+        RegistryError::new(
+            StatusCode::UNAUTHORIZED,
+            "UNAUTHORIZED",
+            &"Unauthorized, no basic auth".to_string(),
+        )
+    })?;
 
     let engine = engine::GeneralPurpose::new(&alphabet::URL_SAFE, general_purpose::PAD);
+
     let decoded = engine
         .decode(auth.as_bytes())
-        .map_err(|_| RegistryError::new(StatusCode::FORBIDDEN, "FORBIDDEN", &"Unauthorized, invalid base64".to_string()))?;
+        .map_err(|_| AccessForbiddenError::new("Unauthorized, invalid base64"))?;
 
     let decoded_str = String::from_utf8(decoded)
-        .map_err(|_| RegistryError::new(StatusCode::FORBIDDEN, "FORBIDDEN", &"Unauthorized, invalid utf8".to_string()))?;
+        .map_err(|_| AccessForbiddenError::new("Unauthorized, invalid utf8"))?;
 
     let parts: Vec<&str> = decoded_str.split(':').collect();
 
     if parts.len() != 2 {
-        return Err(RegistryError::new(StatusCode::FORBIDDEN, "FORBIDDEN", &"Unauthorized, wrong format".to_string()));
+        return Err(AccessForbiddenError::new("Unauthorized, wrong format").into());
     }
 
     let username = parts[0].to_string();
@@ -49,52 +78,53 @@ pub async fn get_roles_for_authentication(basic_auth: Option<String>, reg_arc: &
 
     match ldap {
         Some(ldap) => {
-            let roles = authenticate_and_get_groups(
-                ldap,
-                &username,
-                &password).await
-                .map_err(|e| {
-                    RegistryError::new(
-                        StatusCode::FORBIDDEN,
-                        "FORBIDDEN",
-                        &format!("Unauthorized, ldap error: {}", e),
-                    )
-                })?;
+            let roles = authenticate_and_get_groups(ldap, &username, &password)
+                .await
+                .map_err(|e|
+                    AccessForbiddenError { message: format!("Unauthorized, ldap error: {}", e) }
+                )?;
             if roles.is_empty() {
-                Err(RegistryError::new(
-                    StatusCode::FORBIDDEN,
-                    "FORBIDDEN",
-                    &"Unauthorized, no ldap groups".to_string()))
+                Err(AccessForbiddenError::new("Unauthorized, no ldap groups").into())
             } else {
                 Ok(UserRoles { username, roles })
             }
         }
-        _ => Err(RegistryError::new(
-            StatusCode::FORBIDDEN,
-            "FORBIDDEN",
-            &"Unauthorized, no ldap config".to_string()))
+        _ => Err(AccessForbiddenError::new("Unauthorized, no ldap config").into()),
     }
 }
 
-fn ensure_access(req: &HttpRequest, path: &String, f: fn(&GroupPermissions, Vec<String>, &str) -> bool) -> Result<(), RegistryError> {
+fn ensure_access(
+    req: &HttpRequest,
+    path: &String,
+    f: fn(&GroupPermissions, Vec<String>, &str) -> bool,
+) -> Result<(), RegistryError> {
     let ext = req.extensions();
     let app_config = req.app_data::<Data<AppState>>();
     let perms = app_config.unwrap().permissions.as_ref();
-    let user_with_roles = ext.get::<UserRoles>().ok_or(ErrorBadRequest("no user roles"))?;
+    let user_with_roles = ext
+        .get::<UserRoles>()
+        .ok_or(ErrorBadRequest("no user roles"))?;
 
     let roles = user_with_roles.roles.clone();
 
     let ext = req.extensions();
     let repo = ext.get::<NamedRepository>().unwrap();
 
-    info!("check access to repo: {}:{} for user: {:?}", repo.name, path, &roles);
+    info!(
+        "check access to repo: {}:{} for user: {:?}",
+        repo.name, path, &roles
+    );
     if f(perms, roles, format!("{}:{}", &repo.name, path).as_str()) {
         Ok(())
     } else {
         Err(RegistryError::new(
             StatusCode::UNAUTHORIZED,
             "UNAUTHORIZED",
-            &format!("Unauthorized, no access to repo: {} path: {}", repo.name, path)))
+            &format!(
+                "Unauthorized, no access to repo: {} path: {}",
+                repo.name, path
+            ),
+        ))
     }
 }
 
@@ -115,14 +145,12 @@ pub fn get_writable_repo(req: &HttpRequest) -> Result<Repository, RegistryError>
     ))?;
 
     match &repo.repository {
-        WriteableRepository(r) => {
-            Ok(r.clone())
-        }
+        WriteableRepository(r) => Ok(r.clone()),
         _ => Err(RegistryError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "INTERNAL_SERVER_ERROR",
             &"No repository found in request".to_string(),
-        ))
+        )),
     }
 }
 
@@ -148,8 +176,7 @@ pub async fn user_authorization_check(
                 req.extensions_mut().insert(user);
                 Ok(req)
             }
-            Err(e) =>
-                Err((e.into(), req)),
+            Err(e) => Err((e.into(), req)),
         }
     }
     #[cfg(not(feature = "ldap"))]
@@ -168,7 +195,6 @@ pub struct ReadWriteDefinition {
     pub read: Vec<String>,
     pub write: Vec<String>,
 }
-
 
 pub fn parse_permissions(_permissions: &HashMap<String, ReadWriteDefinition>) -> GroupPermissions {
     #[cfg(not(feature = "ldap"))]

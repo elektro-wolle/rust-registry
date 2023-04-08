@@ -4,7 +4,10 @@ use std::io::prelude::*;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use actix_web::{App, Error, get, head, http::header, HttpMessage, HttpRequest, HttpResponse, HttpResponseBuilder, HttpServer, middleware, patch, post, put, Result, web};
+use actix_web::{
+    App, Error, get, head, http::header, HttpMessage, HttpRequest, HttpResponse, HttpResponseBuilder, HttpServer, middleware,
+    patch, post, put, Result, web,
+};
 use actix_web::error::ErrorBadRequest;
 use actix_web::http::header::CONTENT_LENGTH;
 use actix_web::http::StatusCode;
@@ -24,13 +27,13 @@ use crate::error::*;
 use crate::perm::*;
 use crate::utils::{create_or_replace_file, resolve_layer_path, resolve_manifest_file};
 
+mod api_objects;
+mod authentication;
+mod configuration;
+mod error;
 #[cfg(feature = "ldap")]
 mod ldap;
-mod error;
 mod perm;
-mod api_objects;
-mod configuration;
-mod authentication;
 mod utils;
 
 pub struct AppState {
@@ -62,7 +65,9 @@ async fn write_payload_to_file(
 #[get("/v2/")]
 async fn handle_get_v2(req: HttpRequest) -> Result<HttpResponse, Error> {
     let ext = req.extensions();
-    let user_with_roles = ext.get::<UserRoles>().ok_or(ErrorBadRequest("no user roles"))?;
+    let user_with_roles = ext
+        .get::<UserRoles>()
+        .ok_or(ErrorBadRequest("no user roles"))?;
     info!("userWithRoles: {:?}", user_with_roles);
 
     Ok(HttpResponseBuilder::new(StatusCode::OK)
@@ -84,9 +89,12 @@ async fn handle_v2_catalog(req: HttpRequest) -> Result<Json<RepositoryInfo>, Err
     for path in read_dir.flatten() {
         let file_type = path.file_type()?;
         if file_type.is_dir() {
-            let repo_name = path.file_name()
-                .into_string()
-                .map_err(|_| { ErrorBadRequest(format!("invalid file name: {:?}", path.file_name().to_str())) })?;
+            let repo_name = path.file_name().into_string().map_err(|_| {
+                ErrorBadRequest(format!(
+                    "invalid file name: {:?}",
+                    path.file_name().to_str()
+                ))
+            })?;
             repositories.push(repo_name);
         }
     }
@@ -96,7 +104,8 @@ async fn handle_v2_catalog(req: HttpRequest) -> Result<Json<RepositoryInfo>, Err
 #[post("/v2/{repo_name:.*}/blobs/uploads/")]
 async fn handle_post(
     info: Path<ImageName>,
-    req: HttpRequest) -> Result<HttpResponse, RegistryError> {
+    req: HttpRequest,
+) -> Result<HttpResponse, RegistryError> {
     ensure_write_access(&req, &info.repo_name)?;
 
     let uuid = Uuid::new_v4();
@@ -127,10 +136,12 @@ async fn handle_patch(
     Ok(HttpResponseBuilder::new(StatusCode::ACCEPTED)
         .insert_header((header::RANGE, format!("0-{}", uploaded_file.size)))
         .insert_header(("Docker-Upload-UUID", info.uuid.as_str()))
-        .insert_header(("Docker-Content-Digest", format!("sha256:{}", uploaded_file.sha256)))
+        .insert_header((
+            "Docker-Content-Digest",
+            format!("sha256:{}", uploaded_file.sha256),
+        ))
         .finish())
 }
-
 
 #[get("/v2/{repo_name:.*}/manifests/{tag}")]
 async fn handle_get_manifest_by_tag(
@@ -196,7 +207,10 @@ async fn handle_get_layer_by_hash(
         return Err(RegistryError::new(
             StatusCode::NOT_FOUND,
             "LAYER_UNKNOWN",
-            &format!("file {} for {} not found: is a directory", info.digest, info.repo_name),
+            &format!(
+                "file {} for {} not found: is a directory",
+                info.digest, info.repo_name
+            ),
         ));
     }
     debug!("streaming layer_path: {}", layer_path.display());
@@ -218,7 +232,10 @@ async fn handle_head_layer_by_hash(
         return Err(RegistryError::new(
             StatusCode::NOT_FOUND,
             "LAYER_UNKNOWN",
-            &format!("file {} for {} not found: is a directory", info.digest, info.repo_name),
+            &format!(
+                "file {} for {} not found: is a directory",
+                info.digest, info.repo_name
+            ),
         ));
     }
 
@@ -243,11 +260,16 @@ async fn handle_put_with_digest(
     let writable_repo = get_writable_repo(&req)?;
 
     let layer_path = format!("{}/blobs/{}", info.repo_name, digest_param.digest);
-    let upload_path = writable_repo.get_layer_path(&format!("{}/blobs/uploads/{}", info.repo_name, info.uuid))?;
+    let upload_path =
+        writable_repo.get_layer_path(&format!("{}/blobs/uploads/{}", info.repo_name, info.uuid))?;
     let path_to_file = writable_repo.get_layer_path(&layer_path)?;
 
     // mutex to prevent concurrent writes to the same file
-    trace!("Moving upload_path: {} to path_to_file: {}", upload_path.display(), path_to_file.display());
+    trace!(
+        "Moving upload_path: {} to path_to_file: {}",
+        upload_path.display(),
+        path_to_file.display()
+    );
     fs::rename(upload_path, path_to_file).map_err(map_to_not_found)?;
 
     Ok(HttpResponseBuilder::new(StatusCode::CREATED)
@@ -264,7 +286,7 @@ async fn handle_put_manifest_by_tag(
     ensure_write_access(&req, &info.repo_name)?;
 
     lazy_static! {
-        static ref LOCK_MUTEX:Mutex<u16> = Mutex::new(0);
+        static ref LOCK_MUTEX: Mutex<u16> = Mutex::new(0);
     }
     let manifest_path = get_writable_repo(&req)?
         .get_layer_path(&format!("{}/manifests/{}.json", info.repo_name, info.tag))?;
@@ -274,9 +296,15 @@ async fn handle_put_manifest_by_tag(
     let uploaded_path = write_payload_to_file(&mut payload, &manifest_path).await?;
 
     // manifest is stored as tag and sha256:digest
-    let manifest_digest_path = get_writable_repo(&req)?
-        .get_layer_path(&format!("{}/manifests/sha256:{}.json", info.repo_name, uploaded_path.sha256))?;
-    trace!("manifest_path: {} linked as {}", &manifest_path.display(), manifest_digest_path.display());
+    let manifest_digest_path = get_writable_repo(&req)?.get_layer_path(&format!(
+        "{}/manifests/sha256:{}.json",
+        info.repo_name, uploaded_path.sha256
+    ))?;
+    trace!(
+        "manifest_path: {} linked as {}",
+        &manifest_path.display(),
+        manifest_digest_path.display()
+    );
 
     // lock to prevent concurrent writes to the same file
     let lock = LOCK_MUTEX.lock().await;
@@ -287,8 +315,14 @@ async fn handle_put_manifest_by_tag(
     drop(lock);
 
     Ok(HttpResponseBuilder::new(StatusCode::CREATED)
-        .insert_header(("Docker-Content-Digest", format!("sha256:{}", uploaded_path.sha256)))
-        .insert_header((header::LOCATION, format!("/v2/{}/manifests/{}", info.repo_name, info.tag)))
+        .insert_header((
+            "Docker-Content-Digest",
+            format!("sha256:{}", uploaded_path.sha256),
+        ))
+        .insert_header((
+            header::LOCATION,
+            format!("/v2/{}/manifests/{}", info.repo_name, info.tag),
+        ))
         .finish())
 }
 
@@ -332,9 +366,11 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .wrap(HttpAuthentication::with_fn(user_authorization_check))
             .app_data(Data::clone(&app_data))
-            .wrap(actix_cors::Cors::permissive()
-                .allow_any_origin()
-                .allow_any_method())
+            .wrap(
+                actix_cors::Cors::permissive()
+                    .allow_any_origin()
+                    .allow_any_method(),
+            )
             .wrap(middleware::Logger::default())
             .service(handle_get_v2)
             .service(handle_v2_catalog)
@@ -351,8 +387,12 @@ async fn main() -> std::io::Result<()> {
 
     let mut endpoints: Vec<&dyn SocketSpecification> = vec![];
 
-    registry_config.repositories.iter().for_each(|x| { endpoints.push(x.1); });
-    registry_config.proxies.iter().for_each(|x| { endpoints.push(x.1); });
+    registry_config.repositories.iter().for_each(|x| {
+        endpoints.push(x.1);
+    });
+    registry_config.proxies.iter().for_each(|x| {
+        endpoints.push(x.1);
+    });
 
     let server = endpoints.iter().fold(server, |s, &x| {
         let f = if let Some(http_bind_address) = &x.get_bind_address() {
@@ -387,7 +427,9 @@ mod tests {
     #[cfg(test)]
     #[ctor::ctor]
     fn init() {
-        env_logger::init_from_env(env_logger::Env::new().default_filter_or("info,rust_registry=debug"));
+        env_logger::init_from_env(
+            env_logger::Env::new().default_filter_or("info,rust_registry=debug"),
+        );
     }
 
     #[actix_web::test]
@@ -416,11 +458,14 @@ mod tests {
     fn build_app_data() -> Data<AppState> {
         Data::new(AppState {
             registry: Arc::new(Registry {
-                repositories: HashMap::from([("repo1".to_string(), Repository {
-                    storage_path: "/tmp".to_string(),
-                    bind_address: Some("[::]:8080".to_string()),
-                    tls_config: None,
-                })]),
+                repositories: HashMap::from([(
+                    "repo1".to_string(),
+                    Repository {
+                        storage_path: "/tmp".to_string(),
+                        bind_address: Some("[::]:8080".to_string()),
+                        tls_config: None,
+                    },
+                )]),
                 proxies: HashMap::new(),
                 #[cfg(feature = "ldap")]
                 ldap_config: None,
@@ -457,13 +502,13 @@ mod tests {
         let app = test::init_service(
             App::new()
                 .app_data(build_app_data())
-                .service(handle_put_with_digest)
-        ).await;
+                .service(handle_put_with_digest),
+        )
+            .await;
 
-        let req =
-            test::TestRequest::put()
-                .uri(format!("/v2/foo/bar/blobs/uploads/{}?digest=123", uuid).as_str())
-                .to_request();
+        let req = test::TestRequest::put()
+            .uri(format!("/v2/foo/bar/blobs/uploads/{}?digest=123", uuid).as_str())
+            .to_request();
 
         req.extensions_mut().insert(NamedRepository {
             name: "repo1".to_string(),

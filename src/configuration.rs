@@ -125,13 +125,17 @@ impl ReadableRepository for Repository {
     }
 
     fn lookup_manifest_file(&self, info: &ImageNameWithTag) -> Result<PathBuf, RegistryError> {
-        let manifest_path = Self::get_layer_path(self, &format!("{}/manifests/{}.json", info.repo_name, info.tag))?;
+        let manifest_path = Self::get_layer_path(
+            self,
+            &format!("{}/manifests/{}.json", info.repo_name, info.tag),
+        )?;
         debug!("manifest_path: {}", manifest_path.display());
         Ok(manifest_path)
     }
 
     fn lookup_blob_file(&self, info: &ImageNameWithDigest) -> Result<PathBuf, RegistryError> {
-        let blob_path = Self::get_layer_path(self, &format!("{}/blobs/{}", info.repo_name, info.digest))?;
+        let blob_path =
+            Self::get_layer_path(self, &format!("{}/blobs/{}", info.repo_name, info.digest))?;
         debug!("blob_path: {}", blob_path.display());
         Ok(blob_path)
     }
@@ -161,7 +165,9 @@ fn default_http_port() -> Option<String> {
     Some("[::]:8080".to_string())
 }
 
-fn default_https_port() -> String { "[::]:8443".to_string() }
+fn default_https_port() -> String {
+    "[::]:8443".to_string()
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct TlsConfig {

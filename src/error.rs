@@ -27,8 +27,8 @@ pub struct RegistryError {
 }
 
 impl RegistryError {
-    pub fn new(status_code: StatusCode, error_code: &str, message: &String) -> RegistryError {
-        RegistryError {
+    pub fn new(status_code: StatusCode, error_code: &str, message: &String) -> Self {
+        Self {
             message: message.to_string(),
             status_code,
             error_code: error_code.to_string(),
@@ -125,4 +125,3 @@ pub fn map_to_not_found(err: std::io::Error) -> RegistryError {
         )
     }
 }
-

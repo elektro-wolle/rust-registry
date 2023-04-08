@@ -53,10 +53,9 @@ async fn find_user_dn(
     uid: &str,
 ) -> Result<Option<String>> {
     //let filter = format!(&ldap_config.user_search_filter, uid);
-    let filter = ldap_config.user_search_filter
-        .replace(
-            "{}",
-            escape_ldap_special_chars(&uid).as_str());
+    let filter = ldap_config
+        .user_search_filter
+        .replace("{}", escape_ldap_special_chars(&uid).as_str());
 
     let search_dn = match &ldap_config.user_search_base_dn {
         Some(dn) => dn,
@@ -66,7 +65,8 @@ async fn find_user_dn(
     trace!("Searching for user with {} in {}", &filter, search_dn);
     let (search_results, _ldap_result) = ldap
         .search(search_dn, Scope::Subtree, &filter, vec!["dn"])
-        .await?.success()?;
+        .await?
+        .success()?;
 
     if search_results.len() != 1 {
         debug!("User not found or duplicate uid: {}", uid);
@@ -84,18 +84,15 @@ async fn find_user_dn(
     }
 }
 
-
 #[cfg(feature = "ldap")]
 async fn get_user_groups(
     ldap: &mut Ldap,
     ldap_config: &LdapConfig,
     user_dn: &str,
 ) -> Result<Vec<String>> {
-    let filter = ldap_config.group_search_filter
-        .replace(
-            "{}",
-            escape_ldap_special_chars(&user_dn).as_str());
-
+    let filter = ldap_config
+        .group_search_filter
+        .replace("{}", escape_ldap_special_chars(&user_dn).as_str());
 
     let search_dn = match &ldap_config.group_search_base_dn {
         Some(dn) => dn,
@@ -108,7 +105,8 @@ async fn get_user_groups(
 
     let (search_results, _res) = ldap
         .search(search_dn, Scope::Subtree, &filter, vec![group_attribute])
-        .await?.success()?;
+        .await?
+        .success()?;
 
     let groups: Vec<String> = search_results
         .into_iter()
@@ -117,10 +115,12 @@ async fn get_user_groups(
             trace!("Found group: {:?}", entry);
             entry
         })
-        .filter_map(|entry|
-            entry.attrs.get(group_attribute)
-                .and_then(|vals|
-                    vals.first().cloned()))
+        .filter_map(|entry| {
+            entry
+                .attrs
+                .get(group_attribute)
+                .and_then(|vals| vals.first().cloned())
+        })
         .collect();
 
     Ok(groups)
@@ -133,8 +133,7 @@ pub async fn authenticate_and_get_groups(
     user_password: &str,
 ) -> Result<Vec<String>> {
     trace!("opening ldap connection");
-    let (conn, mut ldap) = LdapConnAsync::new(&ldap_config.ldap_url)
-        .await?;
+    let (conn, mut ldap) = LdapConnAsync::new(&ldap_config.ldap_url).await?;
     ldap3::drive!(conn);
 
     trace!("bind ldap connection");
@@ -166,7 +165,6 @@ pub async fn authenticate_and_get_groups(
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use testcontainers::images::generic::GenericImage;
@@ -179,13 +177,16 @@ mod tests {
     #[cfg(feature = "ldap")]
     async fn test_ldap() {
         let docker = testcontainers::clients::Cli::default();
-        let container = docker.run(GenericImage::new("bitnami/openldap", "latest")
-            .with_env_var("LDAP_ORGANISATION", "My Company")
-            .with_env_var("LDAP_ROOT", "dc=example,dc=com")
-            .with_env_var("LDAP_DOMAIN", "example.com")
-            .with_env_var("LDAP_ADMIN_USERNAME", "admin")
-            .with_env_var("LDAP_ADMIN_PASSWORD", "adminpassword")
-            .with_wait_for(testcontainers::core::WaitFor::message_on_stderr("slapd starting"))
+        let container = docker.run(
+            GenericImage::new("bitnami/openldap", "latest")
+                .with_env_var("LDAP_ORGANISATION", "My Company")
+                .with_env_var("LDAP_ROOT", "dc=example,dc=com")
+                .with_env_var("LDAP_DOMAIN", "example.com")
+                .with_env_var("LDAP_ADMIN_USERNAME", "admin")
+                .with_env_var("LDAP_ADMIN_PASSWORD", "adminpassword")
+                .with_wait_for(testcontainers::core::WaitFor::message_on_stderr(
+                    "slapd starting",
+                )),
         );
 
         let port = container.get_host_port_ipv4(1389);
@@ -207,7 +208,9 @@ mod tests {
             roles: HashMap::from([("readers".to_string(), rw)]),
         };
 
-        let groups = authenticate_and_get_groups(&cfg, "user02", "bitnami2").await.unwrap();
+        let groups = authenticate_and_get_groups(&cfg, "user02", "bitnami2")
+            .await
+            .unwrap();
         assert_eq!(groups, vec!["readers"]);
         info!("Groups: {:?}", groups);
 
