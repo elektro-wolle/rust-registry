@@ -1,40 +1,84 @@
 {
-  "repositories": {
-    "repo1": {
-      "storage_path": "target/repo",
-      "tls_config": {
-        "cert": "certs/pong.pem",
-        "key": "certs/pong.key",
-        "bind_address": "[::]:8443"
-      },
-      "bind_address": "[::]:8080"
+    "repositories": {
+        "repo1": {
+            "tls_config": {
+                "cert": "certs/pong.pem",
+                "key": "certs/pong.key",
+                "bind_address": "[::]:8443"
+            },
+            "bind_address": "[::]:8080",
+            "storage_path": "target/repo",
+            "lifecycle": [
+                "default"
+            ]
+        }
+    },
+    "proxies": {
+        "proxy1": {
+            "storage_path": "target/proxy",
+            "bind_address": "[::]:8081",
+            "remote_url": "http://localhost:8080"
+        }
+    },
+    "groups": {
+        "group1": {
+            "bind_address": "[::]:8082",
+            "repositories": [
+                "proxy",
+                "repo1"
+            ]
+        }
+    },
+    "ldap_config": {
+        "ldap_url": "ldap://127.0.0.1:11389",
+        "bind_dn": "cn=admin,dc=example,dc=com",
+        "bind_password": "adminpassword",
+        "base_dn": "dc=example,dc=com",
+        "user_search_base_dn": "dc=example,dc=com",
+        "user_search_filter": "(&(objectClass=inetOrgPerson)(uid={}))",
+        "group_search_base_dn": "dc=example,dc=com",
+        "group_search_filter": "(&(objectClass=groupOfNames)(member={}))",
+        "group_attribute": "cn",
+        "roles": {
+            "admin": {
+                "read": [
+                    "*"
+                ],
+                "write": [
+                    "repo1:**",
+                    "repo2:private/**:*-SNAPSHOT",
+                    "!repo1:**:*-SNAPSHOT"
+                ]
+            }
+        }
+    },
+    "lifecycle": {
+        "default": {
+            "delete_rules": [
+                {
+                    "path": "**:*-SNAPSHOT",
+                    "max_age_after_upload": "30d",
+                    "max_age_after_download": "30d",
+                    "delete_snapshot_after_release": true
+                },
+                {
+                    "path": "**",
+                    "max_age_after_upload": "180d",
+                    "max_age_after_download": "365d"
+                }
+            ],
+            "keep_rules": [
+                {
+                    "path": "**",
+                    "min_age_after_upload": "30d",
+                    "min_age_after_download": "14d",
+                    "releases": {
+                        "major": -1,
+                        "minor": 3,
+                        "patch": 3
+                    }
+                }
+            ]
+        }
     }
-  },
-  "proxies": {
-    "proxy1": {
-      "storage_path": "target/proxy",
-      "bind_address": "[::]:8081",
-      "remote_url": "http://localhost:8080"
-    }
-  },
-  "groups": {
-    "group1": {
-      "bind_address": "[::]:8082",
-      "repositories": [
-        "proxy",
-        "repo1"
-      ]
-    }
-  },
-  "ldap_config": {
-    "ldap_url": "ldap://127.0.0.1:11389",
-    "bind_dn": "cn=admin,dc=example,dc=com",
-    "bind_password": "adminpassword",
-    "base_dn": "dc=example,dc=com",
-    "user_search_base_dn": "dc=example,dc=com",
-    "user_search_filter": "(&(objectClass=inetOrgPerson)(uid={}))",
-    "group_search_base_dn": "dc=example,dc=com",
-    "group_search_filter": "(&(objectClass=groupOfNames)(member={}))",
-    "group_attribute": "cn"
-  }
 }
