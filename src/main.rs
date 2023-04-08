@@ -1,16 +1,14 @@
 use std::collections::HashMap;
-use std::fs::{self, DirBuilder, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::prelude::*;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use actix_web::{App, Error, get, head, http::header, HttpMessage, HttpRequest, HttpResponse, HttpResponseBuilder, HttpServer, middleware, patch, post, put, Result, web};
-use actix_web::dev::ServiceRequest;
 use actix_web::error::ErrorBadRequest;
 use actix_web::http::header::CONTENT_LENGTH;
 use actix_web::http::StatusCode;
 use actix_web::web::{Data, Json, Path, Payload};
-use actix_web_httpauth::extractors::bearer::BearerAuth;
 use actix_web_httpauth::middleware::HttpAuthentication;
 use futures_util::StreamExt;
 use lazy_static::lazy_static;
@@ -23,9 +21,9 @@ use crate::api_objects::*;
 #[cfg(feature = "ldap")]
 use crate::authentication::*;
 use crate::configuration::*;
-use crate::configuration::TargetRegistry::{ReadOnlyProxy, WriteableRepository};
 use crate::error::*;
 use crate::perm::*;
+use crate::utils::{create_or_replace_file, resolve_layer_path, resolve_manifest_file};
 
 #[cfg(feature = "ldap")]
 mod ldap;
@@ -100,6 +98,7 @@ mod configuration {
     pub trait SocketSpecification {
         fn get_bind_address(&self) -> Option<String>;
         fn get_tls_config(&self) -> Option<TlsConfig>;
+        fn to_target_repository(&self) -> TargetRegistry;
     }
 
     pub trait ReadableRepository {
@@ -127,6 +126,9 @@ mod configuration {
         fn get_tls_config(&self) -> Option<TlsConfig> {
             self.tls_config.clone()
         }
+        fn to_target_repository(&self) -> TargetRegistry {
+            WriteableRepository(self.clone())
+        }
     }
 
     #[derive(Debug, Clone, Deserialize)]
@@ -145,8 +147,12 @@ mod configuration {
         fn get_tls_config(&self) -> Option<TlsConfig> {
             self.tls_config.clone()
         }
+        fn to_target_repository(&self) -> TargetRegistry {
+            ReadOnlyProxy(self.clone())
+        }
     }
 
+    #[derive(Debug, Clone, Deserialize)]
     pub enum TargetRegistry {
         WriteableRepository(Repository),
         ReadOnlyProxy(Proxy),
@@ -252,6 +258,9 @@ mod configuration {
         fn get_tls_config(&self) -> Option<TlsConfig> {
             Some(self.clone())
         }
+        fn to_target_repository(&self) -> TargetRegistry {
+            panic!("not implemented")
+        }
     }
 
     impl TlsServerConfiguration for TlsConfig {
@@ -288,15 +297,26 @@ mod configuration {
     }
 }
 
-#[cfg(feature = "ldap")]
 mod authentication {
+    use std::collections::HashMap;
+
+    use actix_web::{Error, HttpMessage, HttpRequest};
+    use actix_web::dev::ServiceRequest;
+    use actix_web::error::ErrorBadRequest;
     use actix_web::http::StatusCode;
+    use actix_web::web::Data;
+    use actix_web_httpauth::extractors::bearer::BearerAuth;
     use base64::{alphabet, engine, Engine};
     use base64::engine::general_purpose;
+    use log::info;
 
-    use crate::configuration::{Registry, UserRoles};
+    use crate::AppState;
+    use crate::configuration::{NamedRepository, Registry, Repository, UserRoles};
+    use crate::configuration::TargetRegistry::WriteableRepository;
     use crate::error::RegistryError;
-    use crate::ldap::authenticate_and_get_groups;
+    use crate::ldap::{authenticate_and_get_groups, ReadWriteDefinition};
+    use crate::perm::{GroupPermissions, ReadWritePermissions};
+    use crate::utils::insert_resolved_repo;
 
     pub async fn get_roles_for_authentication(basic_auth: Option<String>, reg_arc: &Registry) -> Result<UserRoles, RegistryError> {
         let auth = basic_auth
@@ -349,6 +369,217 @@ mod authentication {
                 &"Unauthorized, no ldap config".to_string()))
         }
     }
+
+    fn ensure_access(req: &HttpRequest, path: &String, f: fn(&GroupPermissions, Vec<String>, &str) -> bool) -> Result<(), RegistryError> {
+        let ext = req.extensions();
+        let app_config = req.app_data::<Data<AppState>>();
+        let perms = app_config.unwrap().permissions.as_ref();
+        let user_with_roles = ext.get::<UserRoles>().ok_or(ErrorBadRequest("no user roles"))?;
+
+        let roles = user_with_roles.roles.clone();
+
+        let ext = req.extensions();
+        let repo = ext.get::<NamedRepository>().unwrap();
+
+        info!("check access to repo: {}:{} for user: {:?}", repo.name, path, &roles);
+        if f(perms, roles, format!("{}:{}", &repo.name, path).as_str()) {
+            Ok(())
+        } else {
+            Err(RegistryError::new(
+                StatusCode::UNAUTHORIZED,
+                "UNAUTHORIZED",
+                &format!("Unauthorized, no access to repo: {} path: {}", repo.name, path)))
+        }
+    }
+
+    pub fn ensure_write_access(req: &HttpRequest, path: &String) -> Result<(), RegistryError> {
+        ensure_access(req, path, |perms, roles, path| perms.can_write(roles, path))
+    }
+
+    pub fn ensure_read_access(req: &HttpRequest, path: &String) -> Result<(), RegistryError> {
+        ensure_access(req, path, |perms, roles, path| perms.can_read(roles, path))
+    }
+
+    pub fn get_writable_repo(req: &HttpRequest) -> Result<Repository, RegistryError> {
+        let ext = req.extensions();
+        let repo = ext.get::<NamedRepository>().ok_or(RegistryError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_SERVER_ERROR",
+            &"No repository found in request".to_string(),
+        ))?;
+
+        match &repo.repository {
+            WriteableRepository(r) => {
+                Ok(r.clone())
+            }
+            _ => Err(RegistryError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_SERVER_ERROR",
+                &"No repository found in request".to_string(),
+            ))
+        }
+    }
+
+    pub async fn user_authorization_check(
+        req: ServiceRequest,
+        _credentials: Option<BearerAuth>,
+    ) -> Result<ServiceRequest, (Error, ServiceRequest)> {
+        let req = insert_resolved_repo(req)?;
+        #[cfg(feature = "ldap")]
+        {
+            let basic_auth: Option<String> = req
+                .headers()
+                .get("authorization")
+                .and_then(|h| h.to_str().ok())
+                .and_then(|auth| auth.strip_prefix("Basic "))
+                .map(|s| s.to_string());
+
+            let app_config = req.app_data::<Data<AppState>>();
+            let reg_arc = app_config.unwrap().registry.as_ref();
+
+            match get_roles_for_authentication(basic_auth, reg_arc).await {
+                Ok(user) => {
+                    req.extensions_mut().insert(user);
+                    Ok(req)
+                }
+                Err(e) =>
+                    Err((e.into(), req)),
+            }
+        }
+        #[cfg(not(feature = "ldap"))]
+        {
+            let anon_user = UserRoles {
+                username: "anonymous",
+                roles: vec!["anonymous"],
+            };
+            req.extensions_mut().insert(anon_user);
+            Ok(req)
+        }
+    }
+
+    pub fn parse_permissions(permissions: &HashMap<String, ReadWriteDefinition>) -> GroupPermissions {
+        let mut mapped_permissions: HashMap<String, ReadWritePermissions> = HashMap::new();
+
+        #[cfg(feature = "ldap")]
+        {
+            permissions
+                .iter()
+                .map(|(group, p)| (group.clone(), ReadWritePermissions::new(&p.read, &p.write)))
+                .for_each(|(group, p)| {
+                    mapped_permissions.insert(group, p);
+                });
+        }
+
+        if mapped_permissions.is_empty() {
+            mapped_permissions.insert("anonymous".to_string(), ReadWritePermissions::new(&vec![".*".to_string()], &vec![".*".to_string()]));
+        }
+
+        GroupPermissions::new(mapped_permissions)
+    }
+}
+
+mod utils {
+    use std::fs::{DirBuilder, File, OpenOptions};
+    use std::path::PathBuf;
+
+    use actix_web::{Error, HttpMessage, HttpRequest};
+    use actix_web::dev::ServiceRequest;
+    use actix_web::error::ErrorBadRequest;
+    use actix_web::http::StatusCode;
+    use actix_web::web::{Data, Path};
+    use log::trace;
+
+    use crate::api_objects::{ImageNameWithDigest, ImageNameWithTag};
+    use crate::AppState;
+    use crate::configuration::{NamedRepository, ReadableRepository, Registry, SocketSpecification, TargetRegistry};
+    use crate::error::{map_to_not_found, RegistryError};
+
+    pub fn resolve_manifest_file(req: HttpRequest, info: &Path<ImageNameWithTag>) -> Result<File, RegistryError> {
+        let ext = req.extensions();
+        let named_repo = ext.get::<NamedRepository>().unwrap();
+        let file_path = &named_repo.repository.lookup_manifest_file(info)?;
+        let file = File::open(file_path).map_err(map_to_not_found)?;
+        Ok(file)
+    }
+
+    pub fn resolve_layer_path(req: &HttpRequest, info: &Path<ImageNameWithDigest>) -> Result<PathBuf, RegistryError> {
+        let layer_path = {
+            let ext = req.extensions();
+            let named_repo = ext.get::<NamedRepository>().unwrap();
+            named_repo.repository.lookup_blob_file(info)?
+        };
+        Ok(layer_path)
+    }
+
+    pub fn create_or_replace_file(path_to_file: &PathBuf) -> Result<File, RegistryError> {
+        let mut dir_builder = DirBuilder::new();
+        trace!("creating dir: {:?}, saving file {:?}", path_to_file.parent(), path_to_file);
+
+        dir_builder
+            .recursive(true)
+            .create(path_to_file.parent().ok_or(ErrorBadRequest("invalid path"))?)
+            .map_err(ErrorBadRequest)?;
+
+        let manifest_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path_to_file)?;
+        Ok(manifest_file)
+    }
+
+    fn check_host(request_host: String, repo_spec: &dyn SocketSpecification) -> bool {
+        if repo_spec.get_bind_address() == Some(request_host.clone()) {
+            return true;
+        }
+        if let Some(tls_cfg) = repo_spec.get_tls_config() {
+            return tls_cfg.bind_address == request_host;
+        }
+        false
+    }
+
+    fn resolve_repo(request_host: String, app_config: &Registry) -> Option<(String, TargetRegistry)> {
+        let mut named_repo: Option<(String, TargetRegistry)> = None;
+
+        if let Some((name, proxy)) = app_config.repositories.iter().find(|&(_, r)| {
+            check_host(request_host.clone(), r)
+        }) {
+            named_repo = Some((name.clone(), proxy.to_target_repository()));
+        } else if let Some((name, proxy)) = app_config.proxies.iter().find(|&(_, r)| {
+            check_host(request_host.clone(), r)
+        }) {
+            named_repo = Some((name.clone(), proxy.to_target_repository()));
+        }
+        named_repo
+    }
+
+    fn resolve_repo_by_bind_address(req: &ServiceRequest, request_host: String) -> Option<(String, TargetRegistry)> {
+        let reg = req.app_data::<Data<AppState>>().unwrap().as_ref();
+        let app_config = reg.registry.as_ref();
+        resolve_repo(request_host, app_config)
+    }
+
+    pub fn insert_resolved_repo(req: ServiceRequest) -> Result<ServiceRequest, (Error, ServiceRequest)> {
+        let request_host = req.app_config().host().to_string();
+
+        let named_repo = resolve_repo_by_bind_address(&req, request_host.clone());
+        if let Some((name, repository)) = named_repo {
+            let repo = NamedRepository {
+                name,
+                repository,
+            };
+            trace!("insert_resolved_repo: request_host: {}, repo: {:?}", request_host, repo.name);
+
+            req.extensions_mut().insert(repo);
+            Ok(req)
+        } else {
+            Err((RegistryError::new(
+                StatusCode::NOT_FOUND,
+                "NOT_FOUND",
+                &format!("Not found, no repo config for host {}", &request_host)).into(), req))
+        }
+    }
 }
 
 pub struct AppState {
@@ -375,173 +606,6 @@ async fn write_payload_to_file(
         sha256: hex::encode(context.finish()),
         size: target_path.metadata()?.len(),
     })
-}
-
-fn create_or_replace_file(path_to_file: &PathBuf) -> Result<File, RegistryError> {
-    let mut dir_builder = DirBuilder::new();
-    trace!("creating dir: {:?}, saving file {:?}", path_to_file.parent(), path_to_file);
-
-    dir_builder
-        .recursive(true)
-        .create(path_to_file.parent().ok_or(ErrorBadRequest("invalid path"))?)
-        .map_err(ErrorBadRequest)?;
-
-    let manifest_file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(path_to_file)?;
-    Ok(manifest_file)
-}
-
-fn ensure_write_access(req: &HttpRequest, path: &String) -> Result<(), RegistryError> {
-    let ext = req.extensions();
-    let repo = ext.get::<NamedRepository>().unwrap();
-    info!("repo: {:?}", repo.name);
-    match repo.repository {
-        WriteableRepository(_) => {
-            let user_with_roles = ext.get::<UserRoles>().ok_or(ErrorBadRequest("no user roles"))?;
-            info!("check write access to repo: {:?} {} for user: {:?}", repo.name, path, user_with_roles);
-
-            Ok(())
-        }
-        _ => Err(RegistryError::new(
-            StatusCode::FORBIDDEN,
-            "FORBIDDEN",
-            &format!("Unauthorized, no writable repo: {}", repo.name)))
-    }
-}
-
-fn ensure_read_access(req: &HttpRequest, path: &String) -> Result<(), RegistryError> {
-    let ext = req.extensions();
-    let user_with_roles = ext.get::<UserRoles>().ok_or(ErrorBadRequest("no user roles"))?;
-    let repo = ext.get::<NamedRepository>().unwrap();
-
-    info!("check read access to repo: {:?} {} for user: {:?}", repo.name, path, user_with_roles);
-
-    Ok(())
-}
-
-fn get_writable_repo(req: &HttpRequest) -> Result<Repository, RegistryError> {
-    let ext = req.extensions();
-    let repo = ext.get::<NamedRepository>().ok_or(RegistryError::new(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "INTERNAL_SERVER_ERROR",
-        &"No repository found in request".to_string(),
-    ))?;
-
-    match &repo.repository {
-        WriteableRepository(r) => {
-            Ok(r.clone())
-        }
-        _ => Err(RegistryError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_SERVER_ERROR",
-            &"No repository found in request".to_string(),
-        ))
-    }
-}
-
-pub async fn user_authorization_check(
-    req: ServiceRequest,
-    _credentials: Option<BearerAuth>,
-) -> Result<ServiceRequest, (Error, ServiceRequest)> {
-    let req = insert_resolved_repo(req)?;
-    #[cfg(feature = "ldap")]
-    {
-        let basic_auth: Option<String> = req
-            .headers()
-            .get("authorization")
-            .and_then(|h| h.to_str().ok())
-            .and_then(|auth| auth.strip_prefix("Basic "))
-            .map(|s| s.to_string());
-
-        // let bearer_auth = credentials.map(|c| c.token().to_string());
-
-        let app_config = req.app_data::<Data<AppState>>();
-        let reg_arc = app_config.unwrap().registry.as_ref();
-
-        match get_roles_for_authentication(basic_auth, reg_arc).await {
-            Ok(user) => {
-                req.extensions_mut().insert(user);
-                Ok(req)
-            }
-            Err(e) =>
-                Err((e.into(), req)),
-        }
-    }
-    #[cfg(not(feature = "ldap"))]
-    {
-        let anon_user = UserRoles {
-            username: "anonymous",
-            roles: vec!["*"],
-        };
-        req.extensions_mut().insert(anon_user);
-        Ok(req)
-    }
-}
-
-fn insert_resolved_repo(req: ServiceRequest) -> Result<ServiceRequest, (Error, ServiceRequest)> {
-    let request_host = req.app_config().host().to_string();
-    let wrapped_host = Some(request_host.clone());
-    let is_tls = req.app_config().secure();
-    let reg = req.app_data::<Data<AppState>>().unwrap().as_ref();
-    let app_config = reg.registry.as_ref();
-
-    let repo = if is_tls {
-        app_config.repositories.iter().find(|&r| {
-            let request_host = request_host.clone();
-            let tls_cfg = &r.1.tls_config;
-            if tls_cfg.is_none() {
-                false
-            } else if let Some(tls_config) = tls_cfg.as_ref() {
-                tls_config.bind_address == request_host
-            } else {
-                false
-            }
-        })
-    } else {
-        app_config.repositories.iter().find(|&r| r.1.bind_address == wrapped_host)
-    };
-
-    let proxy = if is_tls {
-        app_config.proxies.iter().find(|&r| {
-            let request_host = request_host.clone();
-            let tls_cfg = r.1.tls_config.as_ref().unwrap();
-            tls_cfg.bind_address == request_host
-        })
-    } else {
-        app_config.proxies.iter().find(|&r| r.1.bind_address == wrapped_host)
-    };
-
-    let named_repo = match (repo, proxy) {
-        (Some(r), _) => {
-            Some(NamedRepository {
-                name: r.0.clone(),
-                repository: WriteableRepository(r.1.clone()),
-            })
-        }
-        (_, Some(p)) => {
-            Some(NamedRepository {
-                name: p.0.clone(),
-                repository: ReadOnlyProxy(p.1.clone()),
-            })
-        }
-        _ => None
-    };
-
-    match named_repo {
-        Some(r) => {
-            trace!("insert_resolved_repo: request_host: {}, is_tls: {}, repo: {:?}", &request_host, is_tls, repo);
-            req.extensions_mut().insert(r);
-            Ok(req)
-        }
-        None => Err((RegistryError::new(
-            StatusCode::NOT_FOUND,
-            "NOT_FOUND",
-            &format!("Not found, no repo config for host {}", &request_host)).into(), req)),
-    }
 }
 
 #[get("/v2/")]
@@ -616,13 +680,6 @@ async fn handle_patch(
         .finish())
 }
 
-fn resolve_manifest_file(req: HttpRequest, info: &Path<ImageNameWithTag>) -> Result<File, RegistryError> {
-    let ext = req.extensions();
-    let named_repo = ext.get::<NamedRepository>().unwrap();
-    let file_path = &named_repo.repository.lookup_manifest_file(info)?;
-    let file = File::open(file_path).map_err(map_to_not_found)?;
-    Ok(file)
-}
 
 #[get("/v2/{repo_name:.*}/manifests/{tag}")]
 async fn handle_get_manifest_by_tag(
@@ -671,15 +728,6 @@ async fn handle_head_manifest_by_tag(
         .finish())
 }
 
-fn resolve_layer_path(req: &HttpRequest, info: &Path<ImageNameWithDigest>) -> Result<PathBuf, RegistryError> {
-    let layer_path = {
-        let ext = req.extensions();
-        let named_repo = ext.get::<NamedRepository>().unwrap();
-        named_repo.repository.lookup_blob_file(info)?
-    };
-    Ok(layer_path)
-}
-
 #[get("/v2/{repo_name:.*}/blobs/{digest}")]
 async fn handle_get_layer_by_hash(
     req: HttpRequest,
@@ -703,7 +751,6 @@ async fn handle_get_layer_by_hash(
     debug!("streaming layer_path: {}", layer_path.display());
     Ok(file.into_response(&req))
 }
-
 
 #[head("/v2/{repo_name:.*}/blobs/{digest}")]
 async fn handle_head_layer_by_hash(
@@ -813,21 +860,17 @@ async fn main() -> std::io::Result<()> {
     let registry_config: Registry =
         serde_json::from_reader(File::open("config.json").unwrap()).unwrap();
 
-    let permissions = registry_config.ldap_config.clone().unwrap().roles;
-    let mut permissions: HashMap<String, ReadWritePermissions> = permissions
-        .iter()
-        .map(|(group, p)| (group.clone(), ReadWritePermissions::new(&p.read, &p.write)))
-        .collect();
+    let permission_definitions = if let Some(ldap) = registry_config.clone().ldap_config {
+        ldap.roles
+    } else {
+        HashMap::new()
+    };
 
-    {
-        if permissions.is_empty() {
-            permissions.insert("anonymous".to_string(), ReadWritePermissions::new(&vec![".*".to_string()], &vec![".*".to_string()]));
-        }
-    }
+    let group_permissions = parse_permissions(&permission_definitions);
 
     let app_data = Data::new(AppState {
         registry: Arc::new(registry_config.clone()),
-        permissions: Arc::new(GroupPermissions::new(permissions)),
+        permissions: Arc::new(group_permissions),
     });
 
     let server = HttpServer::new(move || {
@@ -881,6 +924,8 @@ mod tests {
     use std::collections::HashMap;
 
     use actix_web::{http::header::ContentType, test};
+
+    use crate::configuration::TargetRegistry::WriteableRepository;
 
     use super::*;
 
