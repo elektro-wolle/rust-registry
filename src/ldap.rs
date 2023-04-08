@@ -9,7 +9,6 @@ use log::debug;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[cfg(feature = "ldap")]
 pub struct ReadWriteDefinition {
     pub read: Vec<String>,
     pub write: Vec<String>,

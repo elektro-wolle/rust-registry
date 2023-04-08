@@ -10,12 +10,30 @@ pub struct GroupPermissions {
 
 impl GroupPermissions {
     pub fn new(group_permissions: HashMap<String, ReadWritePermissions>) -> Self {
-        Self {
-            permissions_by_group: group_permissions.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+        if group_permissions.is_empty() {
+            let mut permission_map = HashMap::new();
+            permission_map.insert("anonymous".to_string(), ReadWritePermissions {
+                read: Permissions::new(&vec!["*".to_string()]),
+                write: Permissions::new(&vec!["*".to_string()]),
+            });
+
+            Self {
+                permissions_by_group: permission_map
+            }
+        } else {
+            Self {
+                permissions_by_group: group_permissions.iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect()
+            }
         }
     }
 
-    fn can_access(&self, groups: Vec<String>, path: &str, check_function: fn(&ReadWritePermissions, &str) -> bool) -> bool {
+    fn can_access(&self,
+                  groups: Vec<String>,
+                  path: &str,
+                  check_function: fn(&ReadWritePermissions, &str) -> bool,
+    ) -> bool {
         for group in groups {
             if let Some(permissions) = self.permissions_by_group.get(&group) {
                 if check_function(permissions, path) {
