@@ -43,7 +43,7 @@ Currently, only the basic functionality is implemented. The following features a
 - [ ] add proxying request to other registries
 - [ ] add support grouping registries in namespaces, e.g. first query the "dev" registry, then the "prod" registry
   before ghcr.io is queried.
-- [ ] add rights management for namespaces
+- [x] add rights management for namespaces
 - [ ] add docker-compose file for easy setup of database
 - [ ] add database backend for reference counting and garbage collection
 - [ ] add search within database
