@@ -1,9 +1,10 @@
 use std::collections::HashMap;
-use std::fs::File;
+use std::fs::{DirBuilder, File};
 use std::io::BufReader;
 use std::path::PathBuf;
 
-use log::debug;
+use lazy_static::lazy_static;
+use log::{debug, trace};
 use path_clean::PathClean;
 use rustls::{Certificate, PrivateKey, ServerConfig};
 use rustls_pemfile::{certs, rsa_private_keys};
@@ -22,7 +23,7 @@ pub trait SocketSpecification {
 }
 
 pub trait ReadableRepository {
-    fn get_layer_path(&self, path: &str) -> Result<PathBuf, RegistryError>;
+    fn get_layer_path(&self, repo: &str, uuid: &str) -> Result<PathBuf, RegistryError>;
     fn lookup_manifest_file(&self, info: &ImageNameWithTag) -> Result<PathBuf, RegistryError>;
     fn lookup_blob_file(&self, info: &ImageNameWithDigest) -> Result<PathBuf, RegistryError>;
 }
@@ -92,10 +93,10 @@ pub struct NamedRepository {
 }
 
 impl ReadableRepository for TargetRegistry {
-    fn get_layer_path(&self, path: &str) -> Result<PathBuf, RegistryError> {
+    fn get_layer_path(&self, repo: &str, uuid: &str) -> Result<PathBuf, RegistryError> {
         match self {
-            WriteableRepository(w) => w.get_layer_path(path),
-            ReadOnlyProxy(r) => r.get_layer_path(path),
+            WriteableRepository(w) => w.get_layer_path(repo, uuid),
+            ReadOnlyProxy(r) => r.get_layer_path(repo, uuid),
         }
     }
 
@@ -115,19 +116,29 @@ impl ReadableRepository for TargetRegistry {
 }
 
 impl ReadableRepository for Repository {
-    fn get_layer_path(&self, path: &str) -> Result<PathBuf, RegistryError> {
+    fn get_layer_path(&self, repo: &str, uuid: &str) -> Result<PathBuf, RegistryError> {
+        lazy_static! { static ref REPO_REGEX: regex::Regex = regex::Regex::new(r"^sha256:(..)(..).*$").unwrap(); }
+
+        let new_path = REPO_REGEX.replace(uuid, "$1/$2/$0");
+        trace!("convert {} to new_path: {}", uuid, new_path);
+
         // clean() will remove any "." and ".." from the path
-        let sub_path = PathBuf::from(format!("/{}", path)).clean();
+        let sub_path = PathBuf::from(format!("/{}/{}", repo, new_path)).clean();
         let target_path = format!("{}/{}", self.storage_path, sub_path.display());
 
         // second clean() to ensure that the path is clean
-        Ok(PathBuf::from(target_path).clean())
+        let path_buf = PathBuf::from(target_path).clean();
+
+        // ensure, that the parent directory exists
+        DirBuilder::new().recursive(true).create(path_buf.parent().unwrap())?;
+        Ok(path_buf)
     }
 
     fn lookup_manifest_file(&self, info: &ImageNameWithTag) -> Result<PathBuf, RegistryError> {
         let manifest_path = Self::get_layer_path(
             self,
-            &format!("{}/manifests/{}.json", info.repo_name, info.tag),
+            info.repo_name.as_str(),
+            &format!("manifests/{}.json", info.tag),
         )?;
         debug!("manifest_path: {}", manifest_path.display());
         Ok(manifest_path)
@@ -135,14 +146,14 @@ impl ReadableRepository for Repository {
 
     fn lookup_blob_file(&self, info: &ImageNameWithDigest) -> Result<PathBuf, RegistryError> {
         let blob_path =
-            Self::get_layer_path(self, &format!("{}/blobs/{}", info.repo_name, info.digest))?;
+            Self::get_layer_path(self, "_blobs", info.digest.as_str())?;
         debug!("blob_path: {}", blob_path.display());
         Ok(blob_path)
     }
 }
 
 impl ReadableRepository for Proxy {
-    fn get_layer_path(&self, _path: &str) -> Result<PathBuf, RegistryError> {
+    fn get_layer_path(&self, _path: &str, _uuid: &str) -> Result<PathBuf, RegistryError> {
         panic!("not implemented")
     }
 

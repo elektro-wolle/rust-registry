@@ -40,6 +40,7 @@ Currently, only the basic functionality is implemented. The following features a
 - [x] add synchronisation for concurrent uploads
 - [x] add support for multiple registries in one instance
 - [x] add test-container for testing against ldap
+- [x] deduplicate layers
 - [ ] add proxying request to other registries
 - [ ] add support grouping registries in namespaces, e.g. first query the "dev" registry, then the "prod" registry
   before ghcr.io is queried.

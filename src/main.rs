@@ -128,7 +128,7 @@ async fn handle_patch(
 
     let upload_path = {
         let repo = get_writable_repo(&req)?;
-        repo.get_layer_path(&format!("{}/blobs/uploads/{}", info.repo_name, info.uuid))?
+        repo.get_layer_path(info.repo_name.as_str(), format!("blobs/uploads/{}", info.uuid).as_str())?
     };
 
     let uploaded_file = write_payload_to_file(&mut payload, &upload_path).await?;
@@ -259,10 +259,9 @@ async fn handle_put_with_digest(
     ensure_write_access(&req, &info.repo_name)?;
     let writable_repo = get_writable_repo(&req)?;
 
-    let layer_path = format!("{}/blobs/{}", info.repo_name, digest_param.digest);
     let upload_path =
-        writable_repo.get_layer_path(&format!("{}/blobs/uploads/{}", info.repo_name, info.uuid))?;
-    let path_to_file = writable_repo.get_layer_path(&layer_path)?;
+        writable_repo.get_layer_path(info.repo_name.as_str(), &format!("blobs/uploads/{}", info.uuid))?;
+    let path_to_file = writable_repo.get_layer_path("_blobs", digest_param.digest.as_str())?;
 
     // mutex to prevent concurrent writes to the same file
     trace!(
@@ -272,6 +271,7 @@ async fn handle_put_with_digest(
     );
     fs::rename(upload_path, path_to_file).map_err(map_to_not_found)?;
 
+    let layer_path = format!("{}/blobs/{}", info.repo_name, digest_param.digest);
     Ok(HttpResponseBuilder::new(StatusCode::CREATED)
         .insert_header((header::LOCATION, format!("/v2/{}", &layer_path)))
         .finish())
@@ -289,17 +289,17 @@ async fn handle_put_manifest_by_tag(
         static ref LOCK_MUTEX: Mutex<u16> = Mutex::new(0);
     }
     let manifest_path = get_writable_repo(&req)?
-        .get_layer_path(&format!("{}/manifests/{}.json", info.repo_name, info.tag))?;
+        .lookup_manifest_file(&info)?;
 
     debug!("manifest_path: {}", manifest_path.display());
 
     let uploaded_path = write_payload_to_file(&mut payload, &manifest_path).await?;
 
     // manifest is stored as tag and sha256:digest
-    let manifest_digest_path = get_writable_repo(&req)?.get_layer_path(&format!(
-        "{}/manifests/sha256:{}.json",
-        info.repo_name, uploaded_path.sha256
-    ))?;
+    let manifest_digest_path = get_writable_repo(&req)?
+        .get_layer_path(
+            info.repo_name.as_str(),
+            &format!("/manifests/sha256:{}.json", uploaded_path.sha256))?;
     trace!(
         "manifest_path: {} linked as {}",
         &manifest_path.display(),
@@ -440,19 +440,19 @@ mod tests {
             .to_http_request();
 
         let repo = Repository {
-            storage_path: "/tmp".to_string(),
+            storage_path: "target/tests/rust-registry".to_string(),
             bind_address: Some("[::]:8080".to_string()),
             tls_config: None,
         };
         let path = "foo/bar".to_string();
-        let layer_path = &repo.get_layer_path(&path).unwrap();
+        let layer_path = &repo.get_layer_path(&path, "baz").unwrap();
 
         req.extensions_mut().insert(NamedRepository {
             name: "repo1".to_string(),
             repository: WriteableRepository(repo),
         });
 
-        assert_eq!(layer_path, &PathBuf::from("/tmp/foo/bar"));
+        assert_eq!(layer_path, &PathBuf::from("target/tests/rust-registry/foo/bar/baz"));
     }
 
     fn build_app_data() -> Data<AppState> {
@@ -477,7 +477,7 @@ mod tests {
     #[actix_web::test]
     async fn test_create_or_replace_file() {
         let uuid = Uuid::new_v4();
-        let path_to_file = PathBuf::from(format!("/tmp/foo/bar/{}/sample", uuid));
+        let path_to_file = PathBuf::from(format!("target/tests/rust-registry/foo/bar/{}/sample", uuid));
         assert!(path_to_file.metadata().is_err());
 
         let manifest_file = create_or_replace_file(&path_to_file).unwrap();
@@ -492,10 +492,10 @@ mod tests {
     async fn test_put_upload() {
         let uuid = Uuid::new_v4();
 
-        let path_to_file = PathBuf::from(format!("/tmp/foo/bar/blobs/uploads/{}", uuid));
+        let path_to_file = PathBuf::from(format!("target/tests/rust-registry/foo/bar/blobs/uploads/{}", uuid));
         create_or_replace_file(&path_to_file).unwrap();
 
-        let path_to_target_file = PathBuf::from("/tmp/foo/bar/blobs/123");
+        let path_to_target_file = PathBuf::from("target/tests/rust-registry/_blobs/12/34/sha256:1234567");
         fs::remove_file(&path_to_target_file).unwrap_or(());
         assert!(!path_to_target_file.exists());
 
@@ -507,13 +507,13 @@ mod tests {
             .await;
 
         let req = test::TestRequest::put()
-            .uri(format!("/v2/foo/bar/blobs/uploads/{}?digest=123", uuid).as_str())
+            .uri(format!("/v2/foo/bar/blobs/uploads/{}?digest=sha256:1234567", uuid).as_str())
             .to_request();
 
         req.extensions_mut().insert(NamedRepository {
             name: "repo1".to_string(),
             repository: WriteableRepository(Repository {
-                storage_path: "/tmp".to_string(),
+                storage_path: "target/tests/rust-registry".to_string(),
                 bind_address: Some("[::]:8080".to_string()),
                 tls_config: None,
             }),
