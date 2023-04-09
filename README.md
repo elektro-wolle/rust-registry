@@ -46,7 +46,8 @@ Currently, only the basic functionality is implemented. The following features a
   before ghcr.io is queried.
 - [x] add rights management for namespaces
 - [ ] add docker-compose file for easy setup of database
-- [ ] add database backend for reference counting and garbage collection
+- [ ] add database backend for reference counting and garbage collection: https://diesel.rs/guides/getting-started.html
+- [ ] async calls to database: https://hub.packtpub.com/multithreading-in-rust-using-crates-tutorial/
 - [ ] add search within database
 - [ ] delete unfinished uploads
 - [ ] multiple uploads of the same tag result in multiple manifests, indentation is changed (3 vs 4 spaces).
