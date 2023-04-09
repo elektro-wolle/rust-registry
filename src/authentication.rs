@@ -28,6 +28,7 @@ struct AccessForbiddenError {
 }
 
 impl AccessForbiddenError {
+    #[cfg(feature = "ldap")]
     fn new(message: &str) -> Self {
         AccessForbiddenError { message: message.to_string() }
     }

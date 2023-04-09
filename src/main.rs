@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::prelude::*;
 use std::path::PathBuf;
@@ -19,6 +19,7 @@ use log::{debug, info, trace};
 use ring::digest::{Context, SHA256};
 use tokio::sync::Mutex;
 use uuid::*;
+use walkdir::{DirEntry, WalkDir};
 
 use crate::api_objects::*;
 use crate::authentication::*;
@@ -78,27 +79,37 @@ async fn handle_get_v2(req: HttpRequest) -> Result<HttpResponse, Error> {
 }
 
 #[get("/v2/_catalog")]
-async fn handle_v2_catalog(req: HttpRequest) -> Result<Json<RepositoryInfo>, Error> {
+async fn handle_v2_catalog(req: HttpRequest) -> Result<Json<RepositoryInfo>, RegistryError> {
     let ext = req.extensions();
-    let repo = ext.get::<Repository>().unwrap();
+    let repo = ext.get::<NamedRepository>().unwrap();
 
-    let storage_path = &repo.storage_path;
-    let mut repositories = Vec::new();
-    let read_dir = fs::read_dir(storage_path)?;
+    let storage_path = repo.repository.get_storage_path()?;
+    let storage_path = if storage_path.ends_with("/") {
+        storage_path.to_string()
+    } else {
+        format!("{}/", storage_path)
+    };
 
-    for path in read_dir.flatten() {
-        let file_type = path.file_type()?;
-        if file_type.is_dir() {
-            let repo_name = path.file_name().into_string().map_err(|_| {
-                ErrorBadRequest(format!(
-                    "invalid file name: {:?}",
-                    path.file_name().to_str()
-                ))
-            })?;
-            repositories.push(repo_name);
-        }
-    }
-    Ok(Json(RepositoryInfo { repositories }))
+    let mut repositories = HashSet::new();
+    WalkDir::new(&storage_path)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .filter(|e| !e.path().file_name().unwrap().to_str().unwrap().starts_with("sha256:"))
+        .filter(|e| e.path().parent().unwrap().file_name().unwrap().to_str().unwrap() == "manifests")
+        .map(|e: DirEntry| {
+            let p = e.path().parent().unwrap().parent().unwrap();
+            p.to_path_buf().to_str().unwrap().to_string()
+        })
+        .for_each(|e| {
+            repositories.insert(e.replace(&storage_path, ""));
+        });
+
+    Ok(Json(RepositoryInfo {
+        repositories: repositories.iter()
+            .filter(|&image_name| ensure_read_access(&req, &image_name).is_ok())
+            .map(|e| e.to_string()).collect()
+    }))
 }
 
 #[post("/v2/{repo_name:.*}/blobs/uploads/")]

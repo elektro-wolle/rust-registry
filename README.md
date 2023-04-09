@@ -49,7 +49,7 @@ Currently, only the basic functionality is implemented. The following features a
 - [ ] add database backend for reference counting and garbage collection
 - [ ] add search within database
 - [ ] delete unfinished uploads
-- [ ] add /v2/_catalog listing via DB
+- [x] add /v2/_catalog listing
 - [ ] add /v2/<name>/tags/list
 - [ ] config file for auth and storage backends
 - [ ] make trait for storage backend

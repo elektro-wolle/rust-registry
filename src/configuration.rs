@@ -79,6 +79,15 @@ pub enum TargetRegistry {
     ReadOnlyProxy(Proxy),
 }
 
+impl TargetRegistry {
+    pub(crate) fn get_storage_path(&self) -> Result<&str, RegistryError> {
+        match self {
+            WriteableRepository(w) => Ok(&w.storage_path),
+            ReadOnlyProxy(r) => Ok(&r.storage_path),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Registry {
     pub repositories: HashMap<String, Repository>,

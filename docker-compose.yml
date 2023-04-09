@@ -13,7 +13,7 @@ services:
     ui:
         image: joxit/docker-registry-ui:latest
         ports:
-            - 9080:80
+            - "9080:80"
         environment:
             - REGISTRY_TITLE=My Private Docker Registry
             - REGISTRY_URL=http://pong:8080
