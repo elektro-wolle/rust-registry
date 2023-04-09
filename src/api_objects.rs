@@ -42,3 +42,9 @@ pub struct DigestParam {
 pub struct VersionInfo {
     pub versions: Vec<&'static str>,
 }
+
+#[derive(Serialize)]
+pub struct TagList {
+    pub name: String,
+    pub tags: Vec<String>,
+}

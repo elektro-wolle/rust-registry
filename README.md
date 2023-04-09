@@ -49,8 +49,9 @@ Currently, only the basic functionality is implemented. The following features a
 - [ ] add database backend for reference counting and garbage collection
 - [ ] add search within database
 - [ ] delete unfinished uploads
+- [ ] multiple uploads of the same tag result in multiple manifests, indentation is changed (3 vs 4 spaces).
 - [x] add /v2/_catalog listing
-- [ ] add /v2/<name>/tags/list
+- [x] add /v2/<name>/tags/list
 - [ ] config file for auth and storage backends
 - [ ] make trait for storage backend
 - [x] implement storage backend for local fs

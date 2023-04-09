@@ -8,8 +8,9 @@ use actix_web::{
     App, Error, get, head, http::header, HttpMessage, HttpRequest, HttpResponse, HttpResponseBuilder, HttpServer, middleware,
     patch, post, put, Result, web,
 };
+use actix_web::body::SizedStream;
 use actix_web::error::ErrorBadRequest;
-use actix_web::http::header::CONTENT_LENGTH;
+use actix_web::http::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use actix_web::http::StatusCode;
 use actix_web::web::{Data, Json, Path, Payload};
 use actix_web_httpauth::middleware::HttpAuthentication;
@@ -84,7 +85,7 @@ async fn handle_v2_catalog(req: HttpRequest) -> Result<Json<RepositoryInfo>, Reg
     let repo = ext.get::<NamedRepository>().unwrap();
 
     let storage_path = repo.repository.get_storage_path()?;
-    let storage_path = if storage_path.ends_with("/") {
+    let storage_path = if storage_path.ends_with('/') {
         storage_path.to_string()
     } else {
         format!("{}/", storage_path)
@@ -107,7 +108,7 @@ async fn handle_v2_catalog(req: HttpRequest) -> Result<Json<RepositoryInfo>, Reg
 
     Ok(Json(RepositoryInfo {
         repositories: repositories.iter()
-            .filter(|&image_name| ensure_read_access(&req, &image_name).is_ok())
+            .filter(|&image_name| ensure_read_access(&req, image_name).is_ok())
             .map(|e| e.to_string()).collect()
     }))
 }
@@ -253,12 +254,15 @@ async fn handle_head_layer_by_hash(
     let file = actix_files::NamedFile::open_async(&layer_path)
         .await
         .map_err(map_to_not_found)?;
+    let size = file.metadata().len();
+    debug!("return layer_path: {} with size {}", layer_path.display(), size);
 
-    debug!("return layer_path: {}", layer_path.display());
-    Ok(HttpResponseBuilder::new(StatusCode::OK)
-        .insert_header((CONTENT_LENGTH, file.metadata().len()))
+    let empty_stream: futures_util::stream::Empty<Result<_>> = futures_util::stream::empty();
+    let empty = SizedStream::new(size, empty_stream);
+    let response = HttpResponseBuilder::new(StatusCode::OK)
         .insert_header(("Docker-Content-Digest", info.digest.to_string()))
-        .finish())
+        .body(empty);
+    Ok(response)
 }
 
 #[put("/v2/{repo_name:.*}/blobs/uploads/{uuid}")]
@@ -286,6 +290,28 @@ async fn handle_put_with_digest(
     Ok(HttpResponseBuilder::new(StatusCode::CREATED)
         .insert_header((header::LOCATION, format!("/v2/{}", &layer_path)))
         .finish())
+}
+
+#[get("/v2/{repo_name:.*}/tags/list")]
+async fn handle_get_tags_for_repo_name(
+    req: HttpRequest,
+    info: Path<ImageName>,
+) -> Result<HttpResponse, RegistryError> {
+    ensure_read_access(&req, &info.repo_name)?;
+    let manifest_path = get_writable_repo(&req)?
+        .get_layer_path(info.repo_name.as_str(), "manifests")?;
+
+    let mut tags = Vec::new();
+    manifest_path.read_dir().map_err(map_to_not_found)?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| !entry.file_name().to_str().unwrap().starts_with("sha256:"))
+        .map(|entry| entry.file_name().to_str().unwrap().to_string())
+        .map(|entry| entry.replace(".json", ""))
+        .for_each(|entry| tags.push(entry));
+
+    Ok(HttpResponseBuilder::new(StatusCode::OK)
+        .insert_header((CONTENT_TYPE, "application/json"))
+        .json(TagList { name: info.repo_name.clone(), tags }))
 }
 
 #[put("/v2/{repo_name:.*}/manifests/{tag}")]
@@ -393,6 +419,7 @@ async fn main() -> std::io::Result<()> {
             .service(handle_get_layer_by_hash)
             .service(handle_put_with_digest)
             .service(handle_put_manifest_by_tag)
+            .service(handle_get_tags_for_repo_name)
             .default_service(web::route().to(handle_default))
     });
 
