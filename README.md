@@ -59,7 +59,7 @@ Currently, only the basic functionality is implemented. The following features a
 - [ ] implement storage backend for s3
 - [x] add tls support
 - [ ] semver parsing for tags, keeping the latest x-major, y-minor, z-patch versions
-- [ ] cleanup-jobs for removing old images/manifests
+- [ ] cleanup-jobs for removing old images/manifests: https://docs.rs/job_scheduler/latest/job_scheduler/
 
 # Maybe
 
