@@ -39,7 +39,7 @@ mod perm;
 mod utils;
 
 pub struct AppState {
-    pub registry: Arc<Registry>,
+    pub registry: Arc<RegistryRunConfiguration>,
     pub permissions: Arc<GroupPermissions>,
 }
 
@@ -118,7 +118,7 @@ async fn handle_post(
     info: Path<ImageName>,
     req: HttpRequest,
 ) -> Result<HttpResponse, RegistryError> {
-    ensure_write_access(&req, &info.repo_name)?;
+    let _repository = get_writable_repo(&req, &info.repo_name)?;
 
     let uuid = Uuid::new_v4();
 
@@ -136,12 +136,11 @@ async fn handle_patch(
     req: HttpRequest,
     mut payload: Payload,
 ) -> Result<HttpResponse, RegistryError> {
-    ensure_write_access(&req, &info.repo_name)?;
+    let repository = get_writable_repo(&req, &info.repo_name)?;
 
-    let upload_path = {
-        let repo = get_writable_repo(&req)?;
-        repo.get_layer_path(info.repo_name.as_str(), format!("blobs/uploads/{}", info.uuid).as_str())?
-    };
+    let upload_path = repository.get_layer_path(
+        info.repo_name.as_str(),
+        format!("blobs/uploads/{}", info.uuid).as_str())?;
 
     let uploaded_file = write_payload_to_file(&mut payload, &upload_path).await?;
 
@@ -271,8 +270,7 @@ async fn handle_put_with_digest(
     info: Path<ImageNameWithUUID>,
     req: HttpRequest,
 ) -> Result<HttpResponse, RegistryError> {
-    ensure_write_access(&req, &info.repo_name)?;
-    let writable_repo = get_writable_repo(&req)?;
+    let writable_repo = get_writable_repo(&req, &info.repo_name)?;
 
     let upload_path =
         writable_repo.get_layer_path(info.repo_name.as_str(), &format!("blobs/uploads/{}", info.uuid))?;
@@ -297,17 +295,15 @@ async fn handle_get_tags_for_repo_name(
     req: HttpRequest,
     info: Path<ImageName>,
 ) -> Result<HttpResponse, RegistryError> {
-    ensure_read_access(&req, &info.repo_name)?;
-    let manifest_path = get_writable_repo(&req)?
+    let repository = get_readable_repo(&req, &info.repo_name)?;
+    let manifest_path = repository
         .get_layer_path(info.repo_name.as_str(), "manifests")?;
 
-    let mut tags = Vec::new();
-    manifest_path.read_dir().map_err(map_to_not_found)?
+    let tags = manifest_path.read_dir().map_err(map_to_not_found)?
         .filter_map(|entry| entry.ok())
-        .filter(|entry| !entry.file_name().to_str().unwrap().starts_with("sha256:"))
         .map(|entry| entry.file_name().to_str().unwrap().to_string())
-        .map(|entry| entry.replace(".json", ""))
-        .for_each(|entry| tags.push(entry));
+        .filter(|entry| !entry.starts_with("sha256:"))
+        .map(|entry| entry.replace(".json", "")).collect();
 
     Ok(HttpResponseBuilder::new(StatusCode::OK)
         .insert_header((CONTENT_TYPE, "application/json"))
@@ -320,36 +316,24 @@ async fn handle_put_manifest_by_tag(
     info: Path<ImageNameWithTag>,
     mut payload: Payload,
 ) -> Result<HttpResponse, RegistryError> {
-    ensure_write_access(&req, &info.repo_name)?;
+    let repository = get_writable_repo(&req, &info.repo_name)?;
 
-    lazy_static! {
-        static ref LOCK_MUTEX: Mutex<u16> = Mutex::new(0);
-    }
-    let manifest_path = get_writable_repo(&req)?
-        .lookup_manifest_file(&info)?;
-
+    let manifest_path = repository.lookup_manifest_file(&info)?;
     debug!("manifest_path: {}", manifest_path.display());
 
     let uploaded_path = write_payload_to_file(&mut payload, &manifest_path).await?;
 
     // manifest is stored as tag and sha256:digest
-    let manifest_digest_path = get_writable_repo(&req)?
-        .get_layer_path(
-            info.repo_name.as_str(),
-            &format!("/manifests/sha256:{}.json", uploaded_path.sha256))?;
+    let manifest_digest_path = repository.get_layer_path(
+        info.repo_name.as_str(),
+        &format!("/manifests/sha256:{}.json", uploaded_path.sha256))?;
     trace!(
         "manifest_path: {} linked as {}",
         &manifest_path.display(),
         manifest_digest_path.display()
     );
 
-    // lock to prevent concurrent writes to the same file
-    let lock = LOCK_MUTEX.lock().await;
-    if manifest_digest_path.exists() {
-        fs::remove_file(&manifest_digest_path)?;
-    }
-    fs::hard_link(&manifest_path, &manifest_digest_path)?;
-    drop(lock);
+    link_files_atomically(&manifest_path, &manifest_digest_path).await?;
 
     Ok(HttpResponseBuilder::new(StatusCode::CREATED)
         .insert_header((
@@ -361,6 +345,20 @@ async fn handle_put_manifest_by_tag(
             format!("/v2/{}/manifests/{}", info.repo_name, info.tag),
         ))
         .finish())
+}
+
+async fn link_files_atomically(manifest_path: &PathBuf, manifest_digest_path: &PathBuf) -> Result<(), RegistryError> {
+    // lock to prevent concurrent writes to the same file
+    lazy_static! {
+        static ref LOCK_MUTEX: Mutex<u16> = Mutex::new(0);
+    }
+    let lock = LOCK_MUTEX.lock().await;
+    if manifest_digest_path.exists() {
+        fs::remove_file(manifest_digest_path)?;
+    }
+    fs::hard_link(manifest_path, manifest_digest_path)?;
+    drop(lock);
+    Ok(())
 }
 
 async fn handle_default(req: HttpRequest) -> HttpResponse {
@@ -379,7 +377,7 @@ async fn handle_default(req: HttpRequest) -> HttpResponse {
 async fn main() -> std::io::Result<()> {
     env_logger::init_from_env(env_logger::Env::new().default_filter_or("info,rust_registry=debug"));
 
-    let registry_config: Registry =
+    let registry_config: RegistryRunConfiguration =
         serde_json::from_reader(File::open("config.json").unwrap()).unwrap();
 
     #[cfg(feature = "ldap")]
@@ -458,7 +456,7 @@ mod tests {
 
     use actix_web::{http::header::ContentType, test};
 
-    use crate::configuration::TargetRegistry::WriteableRepository;
+    use crate::configuration::TargetRepository::WriteableRepository;
 
     use super::*;
 
@@ -495,7 +493,7 @@ mod tests {
 
     fn build_app_data() -> Data<AppState> {
         Data::new(AppState {
-            registry: Arc::new(Registry {
+            registry: Arc::new(RegistryRunConfiguration {
                 repositories: HashMap::from([(
                     "repo1".to_string(),
                     Repository {

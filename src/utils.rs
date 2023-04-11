@@ -11,7 +11,7 @@ use log::trace;
 use crate::api_objects::{ImageNameWithDigest, ImageNameWithTag};
 use crate::AppState;
 use crate::configuration::{
-    NamedRepository, ReadableRepository, Registry, SocketSpecification, TargetRegistry,
+    NamedRepository, ReadableRepository, RegistryRunConfiguration, SocketSpecification, TargetRepository,
 };
 use crate::error::{map_to_not_found, RegistryError};
 
@@ -74,8 +74,8 @@ fn check_host(request_host: String, repo_spec: &dyn SocketSpecification) -> bool
     false
 }
 
-fn resolve_repo(request_host: String, app_config: &Registry) -> Option<(String, TargetRegistry)> {
-    let mut named_repo: Option<(String, TargetRegistry)> = None;
+fn resolve_repo(request_host: String, app_config: &RegistryRunConfiguration) -> Option<(String, TargetRepository)> {
+    let mut named_repo: Option<(String, TargetRepository)> = None;
 
     if let Some((name, proxy)) = app_config
         .repositories
@@ -96,7 +96,7 @@ fn resolve_repo(request_host: String, app_config: &Registry) -> Option<(String, 
 fn resolve_repo_by_bind_address(
     req: &ServiceRequest,
     request_host: String,
-) -> Option<(String, TargetRegistry)> {
+) -> Option<(String, TargetRepository)> {
     let reg = req.app_data::<Data<AppState>>().unwrap().as_ref();
     let app_config = reg.registry.as_ref();
     resolve_repo(request_host, app_config)

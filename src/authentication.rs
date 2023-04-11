@@ -11,10 +11,10 @@ use base64::{alphabet, engine, Engine, engine::general_purpose};
 use log::info;
 
 use crate::AppState;
-use crate::configuration::{NamedRepository, Repository, UserRoles};
+use crate::configuration::{NamedRepository, Repository, TargetRepository, UserRoles};
 #[cfg(feature = "ldap")]
-use crate::configuration::Registry;
-use crate::configuration::TargetRegistry::WriteableRepository;
+use crate::configuration::RegistryRunConfiguration;
+use crate::configuration::TargetRepository::WriteableRepository;
 use crate::error::RegistryError;
 #[cfg(feature = "ldap")]
 use crate::ldap::{authenticate_and_get_groups, ReadWriteDefinition};
@@ -47,7 +47,7 @@ impl From<AccessForbiddenError> for RegistryError {
 #[cfg(feature = "ldap")]
 pub async fn get_roles_for_authentication(
     basic_auth: Option<String>,
-    reg_arc: &Registry,
+    reg_arc: &RegistryRunConfiguration,
 ) -> Result<UserRoles, RegistryError> {
     let auth = basic_auth.ok_or_else(|| {
         RegistryError::new(
@@ -129,7 +129,7 @@ fn ensure_access(
     }
 }
 
-pub fn ensure_write_access(req: &HttpRequest, path: &String) -> Result<(), RegistryError> {
+fn ensure_write_access(req: &HttpRequest, path: &String) -> Result<(), RegistryError> {
     ensure_access(req, path, |perms, roles, path| perms.can_write(roles, path))
 }
 
@@ -137,14 +137,25 @@ pub fn ensure_read_access(req: &HttpRequest, path: &String) -> Result<(), Regist
     ensure_access(req, path, |perms, roles, path| perms.can_read(roles, path))
 }
 
-pub fn get_writable_repo(req: &HttpRequest) -> Result<Repository, RegistryError> {
+fn retrieve_named_repo(req: &HttpRequest) -> Result<NamedRepository, RegistryError> {
     let ext = req.extensions();
     let repo = ext.get::<NamedRepository>().ok_or(RegistryError::new(
         StatusCode::INTERNAL_SERVER_ERROR,
         "INTERNAL_SERVER_ERROR",
         &"No repository found in request".to_string(),
     ))?;
+    Ok(repo.clone())
+}
 
+pub fn get_readable_repo(req: &HttpRequest, repo_name: &String) -> Result<TargetRepository, RegistryError> {
+    ensure_read_access(req, repo_name)?;
+    let repo = retrieve_named_repo(req)?;
+    Ok(repo.repository.clone())
+}
+
+pub fn get_writable_repo(req: &HttpRequest, repo_name: &String) -> Result<Repository, RegistryError> {
+    ensure_write_access(req, repo_name)?;
+    let repo = retrieve_named_repo(req)?;
     match &repo.repository {
         WriteableRepository(r) => Ok(r.clone()),
         _ => Err(RegistryError::new(

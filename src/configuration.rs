@@ -11,7 +11,7 @@ use rustls_pemfile::{certs, rsa_private_keys};
 use serde::Deserialize;
 
 use crate::api_objects::{ImageNameWithDigest, ImageNameWithTag};
-use crate::configuration::TargetRegistry::{ReadOnlyProxy, WriteableRepository};
+use crate::configuration::TargetRepository::{ReadOnlyProxy, WriteableRepository};
 use crate::error::RegistryError;
 #[cfg(feature = "ldap")]
 use crate::ldap::LdapConfig;
@@ -19,7 +19,7 @@ use crate::ldap::LdapConfig;
 pub trait SocketSpecification {
     fn get_bind_address(&self) -> Option<String>;
     fn get_tls_config(&self) -> Option<TlsConfig>;
-    fn to_target_repository(&self) -> TargetRegistry;
+    fn to_target_repository(&self) -> TargetRepository;
 }
 
 pub trait ReadableRepository {
@@ -47,7 +47,7 @@ impl SocketSpecification for Repository {
     fn get_tls_config(&self) -> Option<TlsConfig> {
         self.tls_config.clone()
     }
-    fn to_target_repository(&self) -> TargetRegistry {
+    fn to_target_repository(&self) -> TargetRepository {
         WriteableRepository(self.clone())
     }
 }
@@ -68,18 +68,18 @@ impl SocketSpecification for Proxy {
     fn get_tls_config(&self) -> Option<TlsConfig> {
         self.tls_config.clone()
     }
-    fn to_target_repository(&self) -> TargetRegistry {
+    fn to_target_repository(&self) -> TargetRepository {
         ReadOnlyProxy(self.clone())
     }
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub enum TargetRegistry {
+pub enum TargetRepository {
     WriteableRepository(Repository),
     ReadOnlyProxy(Proxy),
 }
 
-impl TargetRegistry {
+impl TargetRepository {
     pub(crate) fn get_storage_path(&self) -> Result<&str, RegistryError> {
         match self {
             WriteableRepository(w) => Ok(&w.storage_path),
@@ -89,19 +89,20 @@ impl TargetRegistry {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct Registry {
+pub struct RegistryRunConfiguration {
     pub repositories: HashMap<String, Repository>,
     pub proxies: HashMap<String, Proxy>,
     #[cfg(feature = "ldap")]
     pub ldap_config: Option<LdapConfig>,
 }
 
+#[derive(Debug, Clone)]
 pub struct NamedRepository {
     pub name: String,
-    pub repository: TargetRegistry,
+    pub repository: TargetRepository,
 }
 
-impl ReadableRepository for TargetRegistry {
+impl ReadableRepository for TargetRepository {
     fn get_layer_path(&self, repo: &str, uuid: &str) -> Result<PathBuf, RegistryError> {
         match self {
             WriteableRepository(w) => w.get_layer_path(repo, uuid),
@@ -204,7 +205,7 @@ impl SocketSpecification for TlsConfig {
     fn get_tls_config(&self) -> Option<TlsConfig> {
         Some(self.clone())
     }
-    fn to_target_repository(&self) -> TargetRegistry {
+    fn to_target_repository(&self) -> TargetRepository {
         panic!("not implemented")
     }
 }
