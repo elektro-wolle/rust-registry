@@ -4,6 +4,7 @@ use actix_web::{HttpResponse, HttpResponseBuilder};
 use actix_web::error::{PayloadError, ResponseError};
 use actix_web::http::header::ContentType;
 use actix_web::http::StatusCode;
+use diesel::r2d2;
 use log::debug;
 use serde::{Deserialize, Serialize};
 
@@ -84,6 +85,28 @@ impl From<PayloadError> for RegistryError {
         debug!("error: {:?}", error);
         RegistryError {
             message: format!("error reading stream: {:?}", error),
+            status_code: StatusCode::INTERNAL_SERVER_ERROR,
+            error_code: "INTERNAL_SERVER_ERROR".to_string(),
+        }
+    }
+}
+
+impl From<r2d2::Error> for RegistryError {
+    fn from(error: r2d2::Error) -> RegistryError {
+        debug!("error: {:?}", error);
+        RegistryError {
+            message: format!("error opening db: {:?}", error),
+            status_code: StatusCode::INTERNAL_SERVER_ERROR,
+            error_code: "INTERNAL_SERVER_ERROR".to_string(),
+        }
+    }
+}
+
+impl From<diesel::result::Error> for RegistryError {
+    fn from(error: diesel::result::Error) -> RegistryError {
+        debug!("error: {:?}", error);
+        RegistryError {
+            message: format!("error querying db: {:?}", error),
             status_code: StatusCode::INTERNAL_SERVER_ERROR,
             error_code: "INTERNAL_SERVER_ERROR".to_string(),
         }

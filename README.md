@@ -45,18 +45,24 @@ Currently, only the basic functionality is implemented. The following features a
 - [ ] add support grouping registries in namespaces, e.g. first query the "dev" registry, then the "prod" registry
   before ghcr.io is queried.
 - [x] add rights management for namespaces
-- [ ] add docker-compose file for easy setup of database
+- [x] add docker-compose file for easy setup of database
 - [ ] add database backend for reference counting and garbage collection: https://diesel.rs/guides/getting-started.html
+    - [x] add database schema
+    - [x] add database connection pool
+    - [x] add mapping
+    - [x] add/update last access timestamp to manifests, layers and tags
+    - [ ] parse manifest and add layers to database
+    - [ ] add garbage collection for unused layers
 - [ ] async calls to database: https://hub.packtpub.com/multithreading-in-rust-using-crates-tutorial/
 - [ ] add search within database
+    - [ ] add /v2/_catalog listing
+    - [ ] add /v2/<name>/tags/list
 - [ ] delete unfinished uploads
 - [ ] multiple uploads of the same tag result in multiple manifests, indentation is changed (3 vs 4 spaces).
 - [x] add /v2/_catalog listing
 - [x] add /v2/<name>/tags/list
 - [ ] config file for auth and storage backends
-- [ ] make trait for storage backend
 - [x] implement storage backend for local fs
-- [ ] implement storage backend for s3
 - [x] add tls support
 - [ ] semver parsing for tags, keeping the latest x-major, y-minor, z-patch versions
 - [ ] cleanup-jobs for removing old images/manifests: https://docs.rs/job_scheduler/latest/job_scheduler/
@@ -67,6 +73,8 @@ Currently, only the basic functionality is implemented. The following features a
 - [ ] make trait for auth backend
 - [ ] add `docker login` token support
 - [ ] add virtual host support
+- [ ] make trait for storage backend
+- [ ] implement storage backend for s3
 
 # License
 

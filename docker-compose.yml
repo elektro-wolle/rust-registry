@@ -1,5 +1,13 @@
 version: '2.0'
 services:
+    db:
+        image: postgres:13
+        ports:
+            - "5332:5432"
+        environment:
+            - POSTGRES_USER=registry
+            - POSTGRES_PASSWORD=registry
+            - POSTGRES_DB=registry
     ldap:
         image: bitnami/openldap
         ports:

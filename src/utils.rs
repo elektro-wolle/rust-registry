@@ -15,17 +15,24 @@ use crate::configuration::{
 };
 use crate::error::{map_to_not_found, RegistryError};
 
+/** This function is used to resolve the path to a manifest file.
+* It will return the path to the manifest file and the path to the directory containing the manifest file.
+ */
 pub fn resolve_manifest_file(
     req: HttpRequest,
     info: &Path<ImageNameWithTag>,
-) -> Result<File, RegistryError> {
+) -> Result<(File, PathBuf), RegistryError> {
     let ext = req.extensions();
     let named_repo = ext.get::<NamedRepository>().unwrap();
     let file_path = &named_repo.repository.lookup_manifest_file(info)?;
     let file = File::open(file_path).map_err(map_to_not_found)?;
-    Ok(file)
+    Ok((file, file_path.clone()))
 }
 
+/**
+ * This function is used to resolve the path to a layer file.
+ * It will return the path to the layer file and the path to the directory containing the layer file.
+ */
 pub fn resolve_layer_path(
     req: &HttpRequest,
     info: &Path<ImageNameWithDigest>,
@@ -38,6 +45,10 @@ pub fn resolve_layer_path(
     Ok(layer_path)
 }
 
+/**
+ * This function is used to create a file if it does not exist or replace it if it does.
+ * It will create the directory structure if it does not exist.
+ */
 pub fn create_or_replace_file(path_to_file: &PathBuf) -> Result<File, RegistryError> {
     let mut dir_builder = DirBuilder::new();
     trace!(
@@ -64,6 +75,9 @@ pub fn create_or_replace_file(path_to_file: &PathBuf) -> Result<File, RegistryEr
     Ok(manifest_file)
 }
 
+/**
+ * check if the request is a valid request for this registry.
+ */
 fn check_host(request_host: String, repo_spec: &dyn SocketSpecification) -> bool {
     if repo_spec.get_bind_address() == Some(request_host.clone()) {
         return true;
@@ -74,6 +88,9 @@ fn check_host(request_host: String, repo_spec: &dyn SocketSpecification) -> bool
     false
 }
 
+/** find the repository that matches the request host.
+* If no repository matches, return None.
+ */
 fn resolve_repo(request_host: String, app_config: &RegistryRunConfiguration) -> Option<(String, TargetRepository)> {
     let mut named_repo: Option<(String, TargetRepository)> = None;
 
@@ -93,6 +110,10 @@ fn resolve_repo(request_host: String, app_config: &RegistryRunConfiguration) -> 
     named_repo
 }
 
+/**
+ * This function is used to resolve the repository that matches the request host.
+ * It will return the name of the repository and the repository configuration.
+ */
 fn resolve_repo_by_bind_address(
     req: &ServiceRequest,
     request_host: String,
@@ -102,6 +123,9 @@ fn resolve_repo_by_bind_address(
     resolve_repo(request_host, app_config)
 }
 
+/**
+ * Inserts the resolved repository into the request extensions.
+ */
 pub fn insert_resolved_repo(
     req: ServiceRequest,
 ) -> Result<ServiceRequest, (Error, ServiceRequest)> {

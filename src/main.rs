@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::env;
 use std::fs::{self, File};
 use std::io::prelude::*;
 use std::path::PathBuf;
@@ -14,6 +15,10 @@ use actix_web::http::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use actix_web::http::StatusCode;
 use actix_web::web::{Data, Json, Path, Payload};
 use actix_web_httpauth::middleware::HttpAuthentication;
+use diesel::PgConnection;
+use diesel::r2d2::{ConnectionManager, Pool, PooledConnection};
+use diesel_migrations::{embed_migrations, EmbeddedMigrations};
+use dotenvy::dotenv;
 use futures_util::StreamExt;
 use lazy_static::lazy_static;
 use log::{debug, info, trace};
@@ -25,6 +30,7 @@ use walkdir::{DirEntry, WalkDir};
 use crate::api_objects::*;
 use crate::authentication::*;
 use crate::configuration::*;
+use crate::db::update_access_time_to_manifest_and_tag;
 use crate::error::*;
 use crate::perm::*;
 use crate::utils::{create_or_replace_file, resolve_layer_path, resolve_manifest_file};
@@ -37,10 +43,18 @@ mod error;
 mod ldap;
 mod perm;
 mod utils;
+mod db;
+mod schema;
+
+pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
+
+pub type DbPool = Pool<ConnectionManager<PgConnection>>;
+pub type DbConn = PooledConnection<ConnectionManager<PgConnection>>;
 
 pub struct AppState {
     pub registry: Arc<RegistryRunConfiguration>,
     pub permissions: Arc<GroupPermissions>,
+    pub connection_pool: Arc<DbPool>,
 }
 
 /**
@@ -136,7 +150,7 @@ async fn handle_patch(
     req: HttpRequest,
     mut payload: Payload,
 ) -> Result<HttpResponse, RegistryError> {
-    let repository = get_writable_repo(&req, &info.repo_name)?;
+    let (repository, _) = get_writable_repo(&req, &info.repo_name)?;
 
     let upload_path = repository.get_layer_path(
         info.repo_name.as_str(),
@@ -159,9 +173,14 @@ async fn handle_get_manifest_by_tag(
     req: HttpRequest,
     info: Path<ImageNameWithTag>,
 ) -> Result<HttpResponse, RegistryError> {
-    ensure_read_access(&req, &info.repo_name)?;
+    debug!("handle_get_manifest_by_tag: {:?}", info.repo_name);
+    let user_roles = ensure_read_access(&req, &info.repo_name)?;
 
-    let mut file = resolve_manifest_file(req, &info)?;
+    let app_data = req.app_data::<Data<AppState>>().expect("no app data").as_ref();
+    let conn = app_data.connection_pool.get().unwrap();
+
+    let (mut file, path_buf) = resolve_manifest_file(req, &info)?;
+    debug!("try to read manifest {}", path_buf  .to_str().unwrap());
 
     let mut buffer = Vec::new();
     file.read_to_end(&mut buffer)?;
@@ -169,6 +188,11 @@ async fn handle_get_manifest_by_tag(
     let mut context = Context::new(&SHA256);
     context.update(&buffer);
     let digest = hex::encode(context.finish());
+    let digest_to_update = digest.clone();
+
+    debug!("manifest file {} with {} bytes and digest {}", path_buf  .to_str().unwrap(), buffer.len(), digest);
+
+    update_access_time_to_manifest_and_tag(conn, &digest_to_update, &path_buf, &user_roles, &info.tag, &info.repo_name, true)?;
 
     Ok(HttpResponseBuilder::new(StatusCode::OK)
         .insert_header(("Docker-Content-Digest", format!("sha256:{}", digest)))
@@ -186,7 +210,7 @@ async fn handle_head_manifest_by_tag(
 ) -> Result<HttpResponse, RegistryError> {
     ensure_read_access(&req, &info.repo_name)?;
 
-    let file = resolve_manifest_file(req, &info)?;
+    let (file, _) = resolve_manifest_file(req, &info)?;
     let metadata = file.metadata()?;
 
     if metadata.len() == 0 || metadata.is_dir() {
@@ -270,7 +294,7 @@ async fn handle_put_with_digest(
     info: Path<ImageNameWithUUID>,
     req: HttpRequest,
 ) -> Result<HttpResponse, RegistryError> {
-    let writable_repo = get_writable_repo(&req, &info.repo_name)?;
+    let (writable_repo, _) = get_writable_repo(&req, &info.repo_name)?;
 
     let upload_path =
         writable_repo.get_layer_path(info.repo_name.as_str(), &format!("blobs/uploads/{}", info.uuid))?;
@@ -316,7 +340,7 @@ async fn handle_put_manifest_by_tag(
     info: Path<ImageNameWithTag>,
     mut payload: Payload,
 ) -> Result<HttpResponse, RegistryError> {
-    let repository = get_writable_repo(&req, &info.repo_name)?;
+    let (repository, user_roles) = get_writable_repo(&req, &info.repo_name)?;
 
     let manifest_path = repository.lookup_manifest_file(&info)?;
     debug!("manifest_path: {}", manifest_path.display());
@@ -324,9 +348,10 @@ async fn handle_put_manifest_by_tag(
     let uploaded_path = write_payload_to_file(&mut payload, &manifest_path).await?;
 
     // manifest is stored as tag and sha256:digest
+    let digest_to_update = uploaded_path.sha256;
     let manifest_digest_path = repository.get_layer_path(
         info.repo_name.as_str(),
-        &format!("/manifests/sha256:{}.json", uploaded_path.sha256))?;
+        &format!("/manifests/sha256:{}.json", digest_to_update))?;
     trace!(
         "manifest_path: {} linked as {}",
         &manifest_path.display(),
@@ -335,10 +360,14 @@ async fn handle_put_manifest_by_tag(
 
     link_files_atomically(&manifest_path, &manifest_digest_path).await?;
 
+    let app_data = req.app_data::<Data<AppState>>().expect("no app data").as_ref();
+    let conn = app_data.connection_pool.get().unwrap();
+    update_access_time_to_manifest_and_tag(conn, &digest_to_update, &manifest_path, &user_roles, &info.tag, &info.repo_name, false)?;
+
     Ok(HttpResponseBuilder::new(StatusCode::CREATED)
         .insert_header((
             "Docker-Content-Digest",
-            format!("sha256:{}", uploaded_path.sha256),
+            format!("sha256:{}", digest_to_update),
         ))
         .insert_header((
             header::LOCATION,
@@ -376,6 +405,7 @@ async fn handle_default(req: HttpRequest) -> HttpResponse {
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     env_logger::init_from_env(env_logger::Env::new().default_filter_or("info,rust_registry=debug"));
+    dotenv().ok();
 
     let registry_config: RegistryRunConfiguration =
         serde_json::from_reader(File::open("config.json").unwrap()).unwrap();
@@ -392,9 +422,16 @@ async fn main() -> std::io::Result<()> {
 
     let group_permissions = parse_permissions(&permission_definitions);
 
+    let database_url = env::var("DATABASE_URL")
+        .ok()
+        .or(registry_config.clone().database_url)
+        .expect("DATABASE_URL must be set or defined in config.json");
+    let connection_pool = build_connection_pool_for_url(database_url.as_str());
+
     let app_data = Data::new(AppState {
         registry: Arc::new(registry_config.clone()),
         permissions: Arc::new(group_permissions),
+        connection_pool: Arc::new(connection_pool),
     });
 
     let server = HttpServer::new(move || {
@@ -450,11 +487,21 @@ async fn main() -> std::io::Result<()> {
     server.run().await
 }
 
+fn build_connection_pool_for_url(database_url: &str) -> Pool<ConnectionManager<PgConnection>> {
+    Pool::builder()
+        .max_size(15)
+        .build(ConnectionManager::<PgConnection>::new(database_url)).unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
     use actix_web::{http::header::ContentType, test};
+    use diesel::connection::SimpleConnection;
+    use testcontainers::clients::Cli;
+    use testcontainers::Container;
+    use testcontainers::images::generic::GenericImage;
 
     use crate::configuration::TargetRepository::WriteableRepository;
 
@@ -468,11 +515,27 @@ mod tests {
         );
     }
 
+    lazy_static! {
+        static ref DOCKER: Cli = Cli::default();
+        }
+
+    fn start_db_container() -> Container<'static, GenericImage> {
+        DOCKER.run(GenericImage::new("postgres", "13")
+            .with_env_var("POSTGRES_USER", "registry")
+            .with_env_var("POSTGRES_PASSWORD", "registry")
+            .with_env_var("POSTGRES_DB", "registry")
+            .with_wait_for(testcontainers::core::WaitFor::message_on_stderr(
+                "database system is ready to accept connections",
+            )))
+    }
+
+
     #[actix_web::test]
     async fn test_get_upload_path() {
+        let c = start_db_container();
         let req = test::TestRequest::default()
             .insert_header(ContentType::plaintext())
-            .app_data(build_app_data())
+            .app_data(build_app_data(c.get_host_port_ipv4(5432)))
             .to_http_request();
 
         let repo = Repository {
@@ -491,7 +554,8 @@ mod tests {
         assert_eq!(layer_path, &PathBuf::from("target/tests/rust-registry/foo/bar/baz"));
     }
 
-    fn build_app_data() -> Data<AppState> {
+    fn build_app_data(db_port: u16) -> Data<AppState> {
+        let db_url = format!("postgres://registry:registry@localhost:{}/registry", db_port);
         Data::new(AppState {
             registry: Arc::new(RegistryRunConfiguration {
                 repositories: HashMap::from([(
@@ -505,8 +569,10 @@ mod tests {
                 proxies: HashMap::new(),
                 #[cfg(feature = "ldap")]
                 ldap_config: None,
+                database_url: Some(db_url.clone()),
             }),
             permissions: Arc::new(GroupPermissions::new(HashMap::new())),
+            connection_pool: Arc::new(build_connection_pool_for_url(db_url.as_str())),
         })
     }
 
@@ -526,6 +592,7 @@ mod tests {
 
     #[actix_web::test]
     async fn test_put_upload() {
+        use diesel_migrations::MigrationHarness;
         let uuid = Uuid::new_v4();
 
         let path_to_file = PathBuf::from(format!("target/tests/rust-registry/foo/bar/blobs/uploads/{}", uuid));
@@ -535,30 +602,49 @@ mod tests {
         fs::remove_file(&path_to_target_file).unwrap_or(());
         assert!(!path_to_target_file.exists());
 
+        let c = start_db_container();
+
+        let app_data = build_app_data(c.get_host_port_ipv4(5432));
+        let mut co = app_data.connection_pool.get().unwrap();
+        co.build_transaction().run(|pg_conn| {
+            // run pending migrations
+            pg_conn.run_pending_migrations(MIGRATIONS).unwrap();
+
+            Ok(1) as Result<i32, diesel::result::Error>
+        }).unwrap();
+        co.build_transaction().run(|pg_conn| {
+            // insert sample data
+            pg_conn.batch_execute("INSERT INTO manifests (id, path, file_path) VALUES ('e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855', 'foo/bar', 'manifests/foo/bar/manifests/1.0.0.json')")?;
+            pg_conn.batch_execute("INSERT INTO tags (manifest, tag) VALUES ('e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855', '1.0.0')")?;
+            Ok(1) as Result<i32, diesel::result::Error>
+        }).unwrap();
         let app = test::init_service(
             App::new()
-                .app_data(build_app_data())
-                .service(handle_put_with_digest),
-        )
-            .await;
+                .app_data(app_data)
+                .service(handle_put_with_digest)
+                .service(handle_get_manifest_by_tag)
+            ,
+        ).await;
 
         let req = test::TestRequest::put()
             .uri(format!("/v2/foo/bar/blobs/uploads/{}?digest=sha256:1234567", uuid).as_str())
             .to_request();
 
-        req.extensions_mut().insert(NamedRepository {
+        let named_repository = NamedRepository {
             name: "repo1".to_string(),
             repository: WriteableRepository(Repository {
                 storage_path: "target/tests/rust-registry".to_string(),
                 bind_address: Some("[::]:8080".to_string()),
                 tls_config: None,
             }),
-        });
+        };
 
-        req.extensions_mut().insert(UserRoles {
+        let user_roles = UserRoles {
             username: "anonymous".to_string(),
             roles: vec!["anonymous".to_string()],
-        });
+        };
+        req.extensions_mut().insert(named_repository.clone());
+        req.extensions_mut().insert(user_roles.clone());
 
         let resp = test::call_service(&app, req).await;
 
@@ -566,5 +652,27 @@ mod tests {
         assert!(!path_to_file.exists());
         assert_eq!(resp.status(), StatusCode::CREATED);
         fs::remove_file(&path_to_target_file).unwrap_or(());
+
+
+        let path_to_file = PathBuf::from("target/tests/rust-registry/foo/bar/manifests/1.0.0.json");
+        create_or_replace_file(&path_to_file).unwrap();
+
+        let req = test::TestRequest::get()
+            // #[get("/v2/{repo_name:.*}/manifests/{tag}")]
+            .uri("/v2/foo/bar/manifests/1.0.0")
+            .to_request();
+        req.extensions_mut().insert(named_repository.clone());
+        req.extensions_mut().insert(user_roles.clone());
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let req = test::TestRequest::get()
+            // #[get("/v2/{repo_name:.*}/manifests/{tag}")]
+            .uri("/v2/foo/bar/manifests/1.0.0")
+            .to_request();
+        req.extensions_mut().insert(named_repository.clone());
+        req.extensions_mut().insert(user_roles.clone());
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

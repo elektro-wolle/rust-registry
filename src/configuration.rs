@@ -94,6 +94,7 @@ pub struct RegistryRunConfiguration {
     pub proxies: HashMap<String, Proxy>,
     #[cfg(feature = "ldap")]
     pub ldap_config: Option<LdapConfig>,
+    pub database_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]

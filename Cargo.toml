@@ -38,6 +38,10 @@ futures = "0.3.28"
 async-trait = "0.1.68"
 regex = "1.7.3"
 walkdir = "2"
+diesel = { version = "2.1.0", features = ["postgres", "chrono", "r2d2"] }
+diesel_migrations = { version = "2.1.0" }
+dotenvy = "0.15.7"
+chrono = { version = "0.4.26", features = ["serde"] }
 
 [dev-dependencies]
 ctor = "0.2.0"

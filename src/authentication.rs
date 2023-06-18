@@ -98,7 +98,7 @@ fn ensure_access(
     req: &HttpRequest,
     path: &String,
     f: fn(&GroupPermissions, Vec<String>, &str) -> bool,
-) -> Result<(), RegistryError> {
+) -> Result<UserRoles, RegistryError> {
     let ext = req.extensions();
     let app_config = req.app_data::<Data<AppState>>();
     let perms = app_config.unwrap().permissions.as_ref();
@@ -116,7 +116,7 @@ fn ensure_access(
         repo.name, path, &roles
     );
     if f(perms, roles, format!("{}:{}", &repo.name, path).as_str()) {
-        Ok(())
+        Ok(user_with_roles.clone())
     } else {
         Err(RegistryError::new(
             StatusCode::UNAUTHORIZED,
@@ -129,11 +129,11 @@ fn ensure_access(
     }
 }
 
-fn ensure_write_access(req: &HttpRequest, path: &String) -> Result<(), RegistryError> {
+fn ensure_write_access(req: &HttpRequest, path: &String) -> Result<UserRoles, RegistryError> {
     ensure_access(req, path, |perms, roles, path| perms.can_write(roles, path))
 }
 
-pub fn ensure_read_access(req: &HttpRequest, path: &String) -> Result<(), RegistryError> {
+pub fn ensure_read_access(req: &HttpRequest, path: &String) -> Result<UserRoles, RegistryError> {
     ensure_access(req, path, |perms, roles, path| perms.can_read(roles, path))
 }
 
@@ -153,11 +153,11 @@ pub fn get_readable_repo(req: &HttpRequest, repo_name: &String) -> Result<Target
     Ok(repo.repository.clone())
 }
 
-pub fn get_writable_repo(req: &HttpRequest, repo_name: &String) -> Result<Repository, RegistryError> {
-    ensure_write_access(req, repo_name)?;
+pub fn get_writable_repo(req: &HttpRequest, repo_name: &String) -> Result<(Repository, UserRoles), RegistryError> {
+    let user_roles = ensure_write_access(req, repo_name)?;
     let repo = retrieve_named_repo(req)?;
     match &repo.repository {
-        WriteableRepository(r) => Ok(r.clone()),
+        WriteableRepository(r) => Ok((r.clone(), user_roles.clone())),
         _ => Err(RegistryError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "INTERNAL_SERVER_ERROR",
