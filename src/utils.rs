@@ -13,13 +13,14 @@ use crate::AppState;
 use crate::configuration::{
     NamedRepository, ReadableRepository, RegistryRunConfiguration, SocketSpecification, TargetRepository,
 };
+use crate::db::DbConnection;
 use crate::error::{map_to_not_found, RegistryError};
 
 /** This function is used to resolve the path to a manifest file.
 * It will return the path to the manifest file and the path to the directory containing the manifest file.
  */
 pub fn resolve_manifest_file(
-    req: HttpRequest,
+    req: &HttpRequest,
     info: &Path<ImageNameWithTag>,
 ) -> Result<(File, PathBuf), RegistryError> {
     let ext = req.extensions();
@@ -153,4 +154,16 @@ pub fn insert_resolved_repo(
             req,
         ))
     }
+}
+
+
+pub fn run_in_tx<T, F>(req: &HttpRequest, f: F) -> Result<T, RegistryError>
+    where
+        F: FnOnce(&mut DbConnection) -> Result<T, RegistryError>,
+{
+    let app_data = &req.app_data::<Data<AppState>>().expect("no app data").as_ref();
+    let mut pool = app_data.connection_pool.get()?;
+    pool.build_transaction().read_write().run(|c| {
+        f(c)
+    })
 }

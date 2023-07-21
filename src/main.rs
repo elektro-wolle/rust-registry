@@ -30,10 +30,10 @@ use walkdir::{DirEntry, WalkDir};
 use crate::api_objects::*;
 use crate::authentication::*;
 use crate::configuration::*;
-use crate::db::update_access_time_to_manifest_and_tag;
+use crate::db::{UpdateOrCreateManifestTagAndLayers, UpdateOrInsert};
 use crate::error::*;
 use crate::perm::*;
-use crate::utils::{create_or_replace_file, resolve_layer_path, resolve_manifest_file};
+use crate::utils::{create_or_replace_file, resolve_layer_path, resolve_manifest_file, run_in_tx};
 
 mod api_objects;
 mod authentication;
@@ -174,33 +174,51 @@ async fn handle_get_manifest_by_tag(
     info: Path<ImageNameWithTag>,
 ) -> Result<HttpResponse, RegistryError> {
     debug!("handle_get_manifest_by_tag: {:?}", info.repo_name);
+    let extensions = &req.extensions();
+    let named_repo = extensions.get::<NamedRepository>();
+    let repo_name = named_repo.unwrap().name.as_str();
+
     let user_roles = ensure_read_access(&req, &info.repo_name)?;
+    let (mut file, path_buf) = resolve_manifest_file(&req, &info)?;
 
-    let app_data = req.app_data::<Data<AppState>>().expect("no app data").as_ref();
-    let conn = app_data.connection_pool.get().unwrap();
+    debug!("try to read manifest {}", path_buf.to_str().unwrap());
 
-    let (mut file, path_buf) = resolve_manifest_file(req, &info)?;
-    debug!("try to read manifest {}", path_buf  .to_str().unwrap());
+    let (buffer, digest) = load_file_with_hashed_content(&mut file)?;
+    let digest_to_update = digest.as_str();
 
-    let mut buffer = Vec::new();
-    file.read_to_end(&mut buffer)?;
+    debug!("manifest file {} with {} bytes and digest {}",
+        path_buf.to_str().unwrap(),
+        buffer.len(), digest_to_update);
 
-    let mut context = Context::new(&SHA256);
-    context.update(&buffer);
-    let digest = hex::encode(context.finish());
-    let digest_to_update = digest.clone();
-
-    debug!("manifest file {} with {} bytes and digest {}", path_buf  .to_str().unwrap(), buffer.len(), digest);
-
-    update_access_time_to_manifest_and_tag(conn, &digest_to_update, &path_buf, &user_roles, &info.tag, &info.repo_name, true)?;
+    run_in_tx(&req, |c| {
+        let update = UpdateOrCreateManifestTagAndLayers {
+            repo_name,
+            sha256_digest: digest_to_update,
+            path_buf: &path_buf,
+            user_roles: &user_roles,
+            image_tag: &info.tag,
+            image_name: &info.repo_name,
+            fail_if_not_found: true,
+        };
+        update.update_or_insert(c)
+    })?;
 
     Ok(HttpResponseBuilder::new(StatusCode::OK)
-        .insert_header(("Docker-Content-Digest", format!("sha256:{}", digest)))
+        .insert_header(("Docker-Content-Digest", format!("sha256:{}", digest_to_update)))
         .insert_header((
             "Content-Type",
             "application/vnd.docker.distribution.manifest.v2+json",
         ))
         .body(buffer))
+}
+
+fn load_file_with_hashed_content(file: &mut File) -> Result<(Vec<u8>, String), RegistryError> {
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer)?;
+    let mut context = Context::new(&SHA256);
+    context.update(&buffer);
+    let digest = hex::encode(context.finish());
+    Ok((buffer, digest))
 }
 
 #[head("/v2/{repo_name:.*}/manifests/{tag}")]
@@ -210,7 +228,7 @@ async fn handle_head_manifest_by_tag(
 ) -> Result<HttpResponse, RegistryError> {
     ensure_read_access(&req, &info.repo_name)?;
 
-    let (file, _) = resolve_manifest_file(req, &info)?;
+    let (file, _) = resolve_manifest_file(&req, &info)?;
     let metadata = file.metadata()?;
 
     if metadata.len() == 0 || metadata.is_dir() {
@@ -340,15 +358,20 @@ async fn handle_put_manifest_by_tag(
     info: Path<ImageNameWithTag>,
     mut payload: Payload,
 ) -> Result<HttpResponse, RegistryError> {
-    let (repository, user_roles) = get_writable_repo(&req, &info.repo_name)?;
+    let repo_name = {
+        let ext = req.extensions();
+        let repo = ext.get::<NamedRepository>().unwrap();
+        repo.clone().name
+    };
 
+    let (repository, user_roles) = get_writable_repo(&req, &info.repo_name)?;
     let manifest_path = repository.lookup_manifest_file(&info)?;
     debug!("manifest_path: {}", manifest_path.display());
 
     let uploaded_path = write_payload_to_file(&mut payload, &manifest_path).await?;
 
     // manifest is stored as tag and sha256:digest
-    let digest_to_update = uploaded_path.sha256;
+    let digest_to_update = uploaded_path.sha256.as_str();
     let manifest_digest_path = repository.get_layer_path(
         info.repo_name.as_str(),
         &format!("/manifests/sha256:{}.json", digest_to_update))?;
@@ -358,11 +381,23 @@ async fn handle_put_manifest_by_tag(
         manifest_digest_path.display()
     );
 
-    link_files_atomically(&manifest_path, &manifest_digest_path).await?;
+    let update = UpdateOrCreateManifestTagAndLayers {
+        repo_name: repo_name.as_str(),
+        sha256_digest: digest_to_update,
+        path_buf: manifest_path.as_path(),
+        user_roles: &user_roles,
+        image_tag: info.tag.as_str(),
+        image_name: &info.repo_name,
+        fail_if_not_found: false,
+    };
 
     let app_data = req.app_data::<Data<AppState>>().expect("no app data").as_ref();
-    let conn = app_data.connection_pool.get().unwrap();
-    update_access_time_to_manifest_and_tag(conn, &digest_to_update, &manifest_path, &user_roles, &info.tag, &info.repo_name, false)?;
+    let mut conn: PooledConnection<_> = app_data.connection_pool.get().unwrap();
+    conn.build_transaction().run(|c| {
+        update.update_or_insert(c)?;
+        link_files_atomically(&manifest_path, &manifest_digest_path)
+    })?;
+
 
     Ok(HttpResponseBuilder::new(StatusCode::CREATED)
         .insert_header((
@@ -376,12 +411,12 @@ async fn handle_put_manifest_by_tag(
         .finish())
 }
 
-async fn link_files_atomically(manifest_path: &PathBuf, manifest_digest_path: &PathBuf) -> Result<(), RegistryError> {
+fn link_files_atomically(manifest_path: &PathBuf, manifest_digest_path: &PathBuf) -> Result<(), RegistryError> {
     // lock to prevent concurrent writes to the same file
     lazy_static! {
         static ref LOCK_MUTEX: Mutex<u16> = Mutex::new(0);
     }
-    let lock = LOCK_MUTEX.lock().await;
+    let lock = LOCK_MUTEX.lock();
     if manifest_digest_path.exists() {
         fs::remove_file(manifest_digest_path)?;
     }
@@ -493,17 +528,20 @@ fn build_connection_pool_for_url(database_url: &str) -> Pool<ConnectionManager<P
         .build(ConnectionManager::<PgConnection>::new(database_url)).unwrap()
 }
 
+#[allow(unused_imports)]
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::fs::DirBuilder;
 
-    use actix_web::{http::header::ContentType, test};
+    use actix_web::http::header::ContentType;
+    use actix_web::test;
     use diesel::connection::SimpleConnection;
     use testcontainers::clients::Cli;
     use testcontainers::Container;
     use testcontainers::images::generic::GenericImage;
 
-    use crate::configuration::TargetRepository::WriteableRepository;
+    use configuration::TargetRepository::WriteableRepository;
 
     use super::*;
 
@@ -596,9 +634,20 @@ mod tests {
         let uuid = Uuid::new_v4();
 
         let path_to_file = PathBuf::from(format!("target/tests/rust-registry/foo/bar/blobs/uploads/{}", uuid));
-        create_or_replace_file(&path_to_file).unwrap();
+        let mut file = create_or_replace_file(&path_to_file).unwrap();
+        file.write_all("\
+{\
+   \"schemaVersion\": 2,
+   \"mediaType\": \"application/vnd.docker.distribution.manifest.v2+json\",
+   \"config\": {
+      \"mediaType\": \"application/vnd.docker.container.image.v1+json\",
+      \"size\": 3617,
+      \"digest\": \"sha256:a10ae6ee39a1f468f2767b9656aa0ac4bb949112807e63568f20904639abc083\"
+   },
+   \"layers\": []
+}".as_bytes()).unwrap();
 
-        let path_to_target_file = PathBuf::from("target/tests/rust-registry/_blobs/12/34/sha256:1234567");
+        let path_to_target_file = PathBuf::from("target/tests/rust-registry/_blobs/2d/f0/sha256:2df0d520a8335f024bedbeb0d184cf6c09293f22cb418a034848c16f481657a3");
         fs::remove_file(&path_to_target_file).unwrap_or(());
         assert!(!path_to_target_file.exists());
 
@@ -614,8 +663,8 @@ mod tests {
         }).unwrap();
         co.build_transaction().run(|pg_conn| {
             // insert sample data
-            pg_conn.batch_execute("INSERT INTO manifests (id, path, file_path) VALUES ('e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855', 'foo/bar', 'manifests/foo/bar/manifests/1.0.0.json')")?;
-            pg_conn.batch_execute("INSERT INTO tags (manifest, tag) VALUES ('e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855', '1.0.0')")?;
+            pg_conn.batch_execute("INSERT INTO manifests (id, repo, digest, path, file_path, configuration) VALUES ('A1B39DBE-12A0-495F-B2D8-15A147AB10DC', 'repo1', '2df0d520a8335f024bedbeb0d184cf6c09293f22cb418a034848c16f481657a3', 'foo/bar', 'manifests/foo/bar/manifests/1.0.0.json', 'a10ae6ee39a1f468f2767b9656aa0ac4bb949112807e63568f20904639abc083')")?;
+            pg_conn.batch_execute("INSERT INTO tags (id, repo, manifest, tag) VALUES (1, 'repo1', 'A1B39DBE-12A0-495F-B2D8-15A147AB10DC', '1.0.0')")?;
             Ok(1) as Result<i32, diesel::result::Error>
         }).unwrap();
         let app = test::init_service(
@@ -627,7 +676,7 @@ mod tests {
         ).await;
 
         let req = test::TestRequest::put()
-            .uri(format!("/v2/foo/bar/blobs/uploads/{}?digest=sha256:1234567", uuid).as_str())
+            .uri(format!("/v2/foo/bar/blobs/uploads/{}?digest=sha256:2df0d520a8335f024bedbeb0d184cf6c09293f22cb418a034848c16f481657a3", uuid).as_str())
             .to_request();
 
         let named_repository = NamedRepository {
@@ -651,11 +700,17 @@ mod tests {
         assert!(path_to_target_file.exists());
         assert!(!path_to_file.exists());
         assert_eq!(resp.status(), StatusCode::CREATED);
-        fs::remove_file(&path_to_target_file).unwrap_or(());
-
+        // fs::remove_file(&path_to_target_file).unwrap_or(());
 
         let path_to_file = PathBuf::from("target/tests/rust-registry/foo/bar/manifests/1.0.0.json");
-        create_or_replace_file(&path_to_file).unwrap();
+        DirBuilder::new()
+            .recursive(true)
+            .create(
+                path_to_file
+                    .parent().unwrap()
+            )
+            .unwrap();
+        fs::rename(path_to_target_file, &path_to_file).unwrap();
 
         let req = test::TestRequest::get()
             // #[get("/v2/{repo_name:.*}/manifests/{tag}")]

@@ -2,11 +2,15 @@
 
 diesel::table! {
     layers (id) {
+        id -> Uuid,
         #[max_length = 255]
-        id -> Varchar,
+        repo -> Varchar,
+        #[max_length = 255]
+        digest -> Varchar,
         #[max_length = 255]
         file_path -> Varchar,
         access_count -> Int8,
+        size -> Int8,
         #[max_length = 255]
         uploaded_by -> Nullable<Varchar>,
         created_at -> Timestamp,
@@ -17,8 +21,11 @@ diesel::table! {
 
 diesel::table! {
     manifests (id) {
+        id -> Uuid,
         #[max_length = 255]
-        id -> Varchar,
+        repo -> Varchar,
+        #[max_length = 255]
+        digest -> Varchar,
         #[max_length = 255]
         path -> Varchar,
         #[max_length = 255]
@@ -26,6 +33,8 @@ diesel::table! {
         access_count -> Int8,
         #[max_length = 255]
         uploaded_by -> Nullable<Varchar>,
+        #[max_length = 255]
+        configuration -> Varchar,
         created_at -> Timestamp,
         updated_at -> Timestamp,
         last_accessed_at -> Timestamp,
@@ -34,10 +43,8 @@ diesel::table! {
 
 diesel::table! {
     manifests2layers (manifest, layer) {
-        #[max_length = 255]
-        manifest -> Varchar,
-        #[max_length = 255]
-        layer -> Varchar,
+        manifest -> Uuid,
+        layer -> Uuid,
     }
 }
 
@@ -45,7 +52,8 @@ diesel::table! {
     tags (id) {
         id -> Int8,
         #[max_length = 255]
-        manifest -> Varchar,
+        repo -> Varchar,
+        manifest -> Uuid,
         #[max_length = 255]
         tag -> Varchar,
         access_count -> Int8,

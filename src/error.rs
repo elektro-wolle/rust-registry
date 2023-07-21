@@ -4,7 +4,6 @@ use actix_web::{HttpResponse, HttpResponseBuilder};
 use actix_web::error::{PayloadError, ResponseError};
 use actix_web::http::header::ContentType;
 use actix_web::http::StatusCode;
-use diesel::r2d2;
 use log::debug;
 use serde::{Deserialize, Serialize};
 
@@ -91,8 +90,8 @@ impl From<PayloadError> for RegistryError {
     }
 }
 
-impl From<r2d2::Error> for RegistryError {
-    fn from(error: r2d2::Error) -> RegistryError {
+impl From<diesel::r2d2::Error> for RegistryError {
+    fn from(error: diesel::r2d2::Error) -> RegistryError {
         debug!("error: {:?}", error);
         RegistryError {
             message: format!("error opening db: {:?}", error),
@@ -127,6 +126,16 @@ impl From<serde_json::Error> for RegistryError {
     fn from(error: serde_json::Error) -> RegistryError {
         RegistryError {
             message: format!("json error: {:?}", error),
+            status_code: StatusCode::INTERNAL_SERVER_ERROR,
+            error_code: "INTERNAL_SERVER_ERROR".to_string(),
+        }
+    }
+}
+
+impl From<r2d2::Error> for RegistryError {
+    fn from(value: r2d2::Error) -> Self {
+        RegistryError {
+            message: format!("db error: {:?}", value),
             status_code: StatusCode::INTERNAL_SERVER_ERROR,
             error_code: "INTERNAL_SERVER_ERROR".to_string(),
         }
