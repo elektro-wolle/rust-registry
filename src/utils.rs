@@ -81,34 +81,32 @@ pub fn create_or_replace_file(path_to_file: &PathBuf) -> Result<File, RegistryEr
  */
 fn check_host(request_host: String, repo_spec: &dyn SocketSpecification) -> bool {
     if repo_spec.get_bind_address() == Some(request_host.clone()) {
-        return true;
+        true
+    } else if let Some(tls_cfg) = repo_spec.get_tls_config() {
+        tls_cfg.bind_address == request_host
+    } else {
+        false
     }
-    if let Some(tls_cfg) = repo_spec.get_tls_config() {
-        return tls_cfg.bind_address == request_host;
-    }
-    false
 }
 
 /** find the repository that matches the request host.
 * If no repository matches, return None.
  */
 fn resolve_repo(request_host: String, app_config: &RegistryRunConfiguration) -> Option<(String, TargetRepository)> {
-    let mut named_repo: Option<(String, TargetRepository)> = None;
-
     if let Some((name, proxy)) = app_config
         .repositories
         .iter()
         .find(|&(_, r)| check_host(request_host.clone(), r))
     {
-        named_repo = Some((name.clone(), proxy.to_target_repository()));
+        return Some((name.clone(), proxy.to_target_repository()));
     } else if let Some((name, proxy)) = app_config
         .proxies
         .iter()
         .find(|&(_, r)| check_host(request_host.clone(), r))
     {
-        named_repo = Some((name.clone(), proxy.to_target_repository()));
+        return Some((name.clone(), proxy.to_target_repository()));
     }
-    named_repo
+    None
 }
 
 /**
