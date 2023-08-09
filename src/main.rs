@@ -3,6 +3,7 @@ use std::env;
 use std::fs::{self, File};
 use std::io::prelude::*;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use actix_web::{
@@ -22,6 +23,7 @@ use dotenvy::dotenv;
 use futures_util::StreamExt;
 use lazy_static::lazy_static;
 use log::{debug, info, trace};
+use mime::Mime;
 use ring::digest::{Context, SHA256};
 use tokio::sync::Mutex;
 use uuid::*;
@@ -66,12 +68,20 @@ async fn write_payload_to_file(
 ) -> Result<UploadedFile, RegistryError> {
     let mut manifest_file = create_or_replace_file(target_path)?;
     let mut context = Context::new(&SHA256);
+    let mut size: usize = 0;
     while let Some(chunk) = payload.next().await {
         let mut body_content = web::BytesMut::new();
         body_content.extend_from_slice(&chunk?);
+        size += body_content.len();
         context.update(&body_content);
         manifest_file.write_all(&body_content)?;
     }
+    trace!("wrote file {:?} with {}/{} bytes",
+        target_path,
+        size,
+        manifest_file.metadata()?.len()
+    );
+
     Ok(UploadedFile {
         sha256: hex::encode(context.finish()),
         size: target_path.metadata()?.len(),
@@ -135,6 +145,9 @@ async fn handle_post(
     let _repository = get_writable_repo(&req, &info.repo_name)?;
 
     let uuid = Uuid::new_v4();
+    trace!("Headers: {:?}",
+         req.headers()
+    );
 
     Ok(HttpResponseBuilder::new(StatusCode::ACCEPTED)
         .insert_header((
@@ -152,11 +165,22 @@ async fn handle_patch(
 ) -> Result<HttpResponse, RegistryError> {
     let (repository, _) = get_writable_repo(&req, &info.repo_name)?;
 
+    trace!("Headers: {:?}",
+         req.headers()
+    );
+
     let upload_path = repository.get_layer_path(
         info.repo_name.as_str(),
         format!("blobs/uploads/{}", info.uuid).as_str())?;
 
     let uploaded_file = write_payload_to_file(&mut payload, &upload_path).await?;
+
+    trace!("Imported file with uuid {} size {}/{} and digest {}",
+        info.uuid,
+        upload_path.metadata()?.len(),
+        uploaded_file.size,
+        uploaded_file.sha256
+    );
 
     Ok(HttpResponseBuilder::new(StatusCode::ACCEPTED)
         .insert_header((header::RANGE, format!("0-{}", uploaded_file.size)))
@@ -255,7 +279,7 @@ async fn handle_get_layer_by_hash(
     let file = actix_files::NamedFile::open_async(&layer_path)
         .await
         .map_err(map_to_not_found)?;
-
+    let file = file.set_content_type(Mime::from_str("application/vnd.docker.image.rootfs.diff.tar.gzip").unwrap());
     if file.metadata().is_dir() {
         return Err(RegistryError::new(
             StatusCode::NOT_FOUND,
@@ -301,6 +325,7 @@ async fn handle_head_layer_by_hash(
     let empty_stream: futures_util::stream::Empty<Result<_>> = futures_util::stream::empty();
     let empty = SizedStream::new(size, empty_stream);
     let response = HttpResponseBuilder::new(StatusCode::OK)
+        .content_type("application/vnd.docker.image.rootfs.diff.tar.gzip")
         .insert_header(("Docker-Content-Digest", info.digest.to_string()))
         .body(empty);
     Ok(response)
@@ -318,11 +343,13 @@ async fn handle_put_with_digest(
         writable_repo.get_layer_path(info.repo_name.as_str(), &format!("blobs/uploads/{}", info.uuid))?;
     let path_to_file = writable_repo.get_layer_path("_blobs", digest_param.digest.as_str())?;
 
+    let size = upload_path.metadata()?.len();
     // mutex to prevent concurrent writes to the same file
     trace!(
-        "Moving upload_path: {} to path_to_file: {}",
+        "Moving upload_path: {} to path_to_file: {} with size {}",
         upload_path.display(),
-        path_to_file.display()
+        path_to_file.display(),
+        size
     );
     fs::rename(upload_path, path_to_file).map_err(map_to_not_found)?;
 
@@ -376,9 +403,10 @@ async fn handle_put_manifest_by_tag(
         info.repo_name.as_str(),
         &format!("/manifests/sha256:{}.json", digest_to_update))?;
     trace!(
-        "manifest_path: {} linked as {}",
+        "manifest_path: {} linked as {} with sha: {}",
         &manifest_path.display(),
-        manifest_digest_path.display()
+        manifest_digest_path.display(),
+        digest_to_update
     );
 
     let update = UpdateOrCreateManifestTagAndLayers {
@@ -420,7 +448,7 @@ fn link_files_atomically(manifest_path: &PathBuf, manifest_digest_path: &PathBuf
     if manifest_digest_path.exists() {
         fs::remove_file(manifest_digest_path)?;
     }
-    fs::hard_link(manifest_path, manifest_digest_path)?;
+    fs::copy(manifest_path, manifest_digest_path)?;
     drop(lock);
     Ok(())
 }
@@ -439,7 +467,7 @@ async fn handle_default(req: HttpRequest) -> HttpResponse {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    env_logger::init_from_env(env_logger::Env::new().default_filter_or("info,rust_registry=debug"));
+    env_logger::init_from_env(env_logger::Env::new().default_filter_or("info,rust_registry=trace,rust_registry::ldap=info,rust_registry::authentication=warn"));
     dotenv().ok();
 
     let registry_config: RegistryRunConfiguration =
